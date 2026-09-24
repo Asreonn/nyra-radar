@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#10100f">
+  <title>Nyra Radar</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#/today" aria-label="Nyra Radar home"><span class="brand-mark">N</span><span>NYRA <b>RADAR</b></span></a>
+    <label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="Search projects, ideas, stories…" autocomplete="off"><kbd>/</kbd></label>
+    <button id="theme" class="icon-button" title="Toggle theme" aria-label="Toggle theme">◐</button>
+  </header>
+  <div class="shell">
+    <nav class="sidebar" aria-label="Primary">
+      <div class="nav-group">
+        <a href="#/today" data-route="today"><span>◉</span>Today</a>
+        <a href="#/explore" data-route="explore"><span>⌁</span>Explore</a>
+        <a href="#/projects" data-route="projects"><span>⌘</span>Projects</a>
+        <a href="#/saved" data-route="saved"><span>◇</span>Saved</a>
+        <a href="#/history" data-route="history"><span>↶</span>History</a>
+      </div>
+      <div class="nav-group nav-bottom">
+        <a href="#/sources" data-route="sources"><span>◎</span>Sources</a>
+        <a href="#/settings" data-route="settings"><span>⚙</span>Settings</a>
+      </div>
+      <div id="system-pill" class="system-pill"><i></i><span>Connecting</span></div>
+    </nav>
+    <main id="main" tabindex="-1"><div class="loading"><i></i><span>Scanning the horizon</span></div></main>
+  </div>
+  <nav class="mobile-nav" aria-label="Mobile primary">
+    <a href="#/today" data-route="today"><span>◉</span>Today</a>
+    <a href="#/explore" data-route="explore"><span>⌁</span>Explore</a>
+    <a href="#/projects" data-route="projects"><span>⌘</span>Projects</a>
+    <a href="#/saved" data-route="saved"><span>◇</span>Saved</a>
+  </nav>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/assets/app.js"></script>
+</body>
+</html>

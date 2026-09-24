@@ -1,0 +1,7 @@
+[Unit]
+Description=Nyra Radar
+Wants=nyra-radar-api.service nyra-radar-worker.service
+After=nyra-radar-api.service nyra-radar-worker.service
+
+[Install]
+WantedBy=default.target

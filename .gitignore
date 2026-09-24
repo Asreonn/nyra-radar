@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+*.db
+*.db-shm
+*.db-wal
+.env
+*.log
+# Upstream reference clones (study only, not runtime); reproducible from references/manifest.json.
+references/*
+!references/manifest.json

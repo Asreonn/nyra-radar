@@ -1,0 +1,22 @@
+[Unit]
+Description=Nyra Radar local API and web interface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/asreonn/Apps/nyra-radar
+ExecStart=/home/asreonn/Apps/nyra-radar/.venv/bin/radar serve
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/asreonn/.local/share/nyra-radar /home/asreonn/.cache/nyra-radar /home/asreonn/.config/nyra-radar /run/user/1000/nyra-radar
+MemoryHigh=768M
+MemoryMax=1536M
+
+[Install]
+WantedBy=default.target
