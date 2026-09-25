@@ -3,10 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#101113">
   <title>Nyra Radar</title>
   <script>
-    try { const t = localStorage.getItem('radar-theme'); if (t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches)) document.documentElement.classList.add('dark'); } catch (e) {}
+    try { if (localStorage.getItem('radar-theme') === 'light') document.documentElement.classList.add('light'); } catch (e) {}
   </script>
   <link rel="stylesheet" href="/assets/app.css">
 </head>

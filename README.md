@@ -2,7 +2,9 @@
 
 Nyra Radar is a self-hosted personal technology intelligence radar and open-source discovery engine. It continuously collects from heterogeneous sources, preserves raw sightings, extracts and clusters coverage, treats repositories as evolving projects, learns explicit preferences, and reserves feed capacity for exploration.
 
-It is deliberately not an RSS inbox: the main unit is a ranked story or project signal, while the complete unranked collection remains manually browsable. Reddit is the primary community source: Today opens with the best threads from your subreddits, and a dedicated Reddit view lets you browse them like Reddit itself (hot/top/new/discussed, per subreddit, with the discussion thread inline). Hacker News follows as its own section and view. The UI is a single, quiet reading column.
+It is deliberately not an RSS inbox: the main unit is a ranked story or project signal, while the complete unranked collection remains manually browsable. Reddit is the primary community source: Today opens with the best threads from your subreddits, and a dedicated Reddit view lets you browse them like Reddit itself (hot/top/new/discussed, per subreddit, with the discussion thread inline). Hacker News follows as its own section and view. The UI is a single, quiet reading column in Nyra's palette (dark first, purple accent — taken from the Nyra app's `src/index.css`).
+
+Reading: Reddit image, gallery and video posts show their picture large in the feed (Atom thumbnails are upgraded to the original `i.redd.it` upload); opening a post shows the complete Reddit text and a compact discussion — three top-level comments clamped to three lines, replies folded, "Show more" for the rest. Images open in a lightbox, lists continue loading as you scroll, opened posts are dimmed and posts new since your last visit get a dot. Keyboard: `j`/`k` move, `o` opens, `l` more like this, `d` less like this, `s` save, `x` hide, `/` search, `?` help.
 
 ## Current installation
 

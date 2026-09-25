@@ -107,6 +107,33 @@ async def reddit_rss(http: Http, url: str, params: dict[str, Any] | None = None)
     return parse_feed(resp.content)
 
 
+def full_size_image(url: str | None) -> str | None:
+    """preview.redd.it/<id>.<ext>?width=140&… -> i.redd.it/<id>.<ext>, the original upload.
+
+    Reddit-hosted images (single images and gallery items) share their media id between the
+    signed, resized preview and the original, so Atom's 140 px thumbnail leads to the full image.
+    external-preview.redd.it (link previews of other sites) has no such original.
+    """
+    if not url:
+        return None
+    parts = urlsplit(html.unescape(url))
+    if parts.hostname != "preview.redd.it" or not re.fullmatch(r"/[A-Za-z0-9]+\.(png|jpe?g|gif|webp)", parts.path):
+        return None
+    return f"https://i.redd.it{parts.path}"
+
+
+def media_type(target: str | None, post: dict[str, Any] | None = None) -> str | None:
+    """image | gallery | video for Reddit-hosted media posts, else None."""
+    post = post or {}
+    if post.get("is_gallery") or (target and "reddit.com/gallery" in target):
+        return "gallery"
+    if post.get("is_video") or (target and "v.redd.it" in target):
+        return "video"
+    if target and any(h in target for h in ("i.redd.it", "preview.redd.it", "i.imgur.com")):
+        return "image"
+    return None
+
+
 def _listing_meta(sort: str, rank: int, size: int) -> dict[str, Any]:
     return {"reddit_sort": sort, "reddit_rank": rank, "reddit_listing_size": size,
             "reddit_seen_at": iso(utcnow())}
@@ -143,6 +170,7 @@ def post_to_raw(post: dict[str, Any]) -> RawItem | None:
             post_kind="self" if is_self else ("media" if is_media else "link")),
         meta={"subreddit": sub, "domain": post.get("domain"), "stickied": bool(post.get("stickied")),
               "via": "json", "media_url": target if is_media else None,
+              "media_type": media_type(target, post) if is_media else None,
               "crosspost_from": [c.get("subreddit") for c in post.get("crosspost_parent_list") or []
                                  if c.get("subreddit")]},
     )
@@ -155,6 +183,9 @@ def post_to_raw(post: dict[str, Any]) -> RawItem | None:
     thumb = post.get("thumbnail")
     if thumb and thumb.startswith("http"):
         item.add_image("reddit_thumb", thumb)
+    for media in list((post.get("media_metadata") or {}).values())[:1]:  # first gallery image
+        source = (media.get("s") or {}).get("u") or (media.get("s") or {}).get("gif")
+        item.add_image("reddit_preview", html.unescape(source) if source else None)
     if link_url:
         item.links.append(link_url)
     item.links += extract_urls(selftext, 30)
@@ -193,12 +224,15 @@ def rss_entry_to_raw(entry: Any) -> RawItem | None:
         community=CommunityInfo(platform="reddit", post_id=post_id, discussion_url=discussion, community=sub,
                                 score=None, num_comments=None, is_self=is_self,
                                 post_kind="self" if is_self else ("media" if is_media else "link")),
-        meta={"subreddit": sub, "via": "rss", "media_url": target if is_media else None},
+        meta={"subreddit": sub, "via": "rss", "media_url": target if is_media else None,
+              "media_type": media_type(target) if is_media else None},
     )
     if is_media and target.startswith(("https://i.redd.it", "https://i.imgur.com")):
         item.add_image("reddit_preview", target)
     for thumb in entry.get("media_thumbnail") or []:
-        item.add_image("reddit_thumb", html.unescape(thumb.get("url") or ""))
+        url = html.unescape(thumb.get("url") or "")
+        item.add_image("reddit_preview", full_size_image(url))
+        item.add_image("reddit_thumb", url)
     if link_url:
         item.links.append(link_url)
     if self_block:

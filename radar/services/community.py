@@ -94,7 +94,7 @@ def community_info(post: CommunityPost, item: Item) -> dict:
             "is_self": post.is_self, "flair": post.flair, "upvote_ratio": post.upvote_ratio,
             "score": post.score if known else None, "comments": post.num_comments if known else None,
             "votes_known": known, "discussion_url": post.discussion_url, "linked_url": post.linked_url,
-            "media_url": meta.get("media_url"), "listing": listing}
+            "media_url": meta.get("media_url"), "media": meta.get("media_type"), "listing": listing}
 
 
 def _source_label(source: Source) -> str:

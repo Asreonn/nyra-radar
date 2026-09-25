@@ -80,8 +80,10 @@ class Daemon:
             # Network-only (no model): keep the best Reddit/HN discussions ready to read.
             result["comments"] = await prefetch_threads(
                 session, self.http, self.config, limit=int(get_setting(session, "pipeline.comments_per_cycle", 6)))
+            # Images are network + a light resize: always keep up with new posts, faster when idle.
+            result["images"] = await cache_images(session, self.http, self.config,
+                                                  limit=24 if state.heavy_allowed else 12)
             if state.heavy_allowed:
-                result["images"] = await cache_images(session, self.http, self.config, limit=8)
                 result["projects"] = await hydrate_due(session, GitHubAPI(self.http, self.config), limit=3)
             if self._due(session, "discovery", 360):
                 found = mine_candidates(session)

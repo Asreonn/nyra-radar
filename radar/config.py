@@ -275,7 +275,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "digest": 360, "cleanup": 1440, "interest_refresh": 10, "story_summaries": 20,
     },
     "images.cache_enabled": True,
-    "images.max_width": 960,
+    "images.max_width": 1280,
     "privacy.record_impressions": True,
     "privacy.history_retention_days": 180,
     "storage.item_retention_days": 45,

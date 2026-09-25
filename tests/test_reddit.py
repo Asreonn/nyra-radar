@@ -233,3 +233,40 @@ def test_account_connect_signals_and_taste_profile(db):
 def test_html_to_text_keeps_structure():
     text = html_to_text("<p>Hello &amp; welcome</p><p>Second<br>line</p><ul><li>a</li><li>b</li></ul>")
     assert text == "Hello & welcome\n\nSecond\nline\n\n• a\n• b"
+
+
+def test_full_size_images_from_reddit_thumbnails():
+    from radar.collectors.reddit import full_size_image, media_type
+    thumb = "https://preview.redd.it/bcrjsh1hxkrh1.png?width=140&amp;height=132&amp;auto=webp&amp;s=dc9"
+    assert full_size_image(thumb) == "https://i.redd.it/bcrjsh1hxkrh1.png"
+    assert full_size_image("https://external-preview.redd.it/x.jpeg?width=640") is None
+    assert media_type("https://www.reddit.com/gallery/1wpkz0o") == "gallery"
+    assert media_type("https://v.redd.it/abc") == "video"
+    gallery = parse_feed(atom(_entry("g1", "My rack", '<a href="https://www.reddit.com/gallery/g1">[link]</a>',
+                                     thumb=thumb.replace("&amp;", "&")))).entries[0]
+    raw = rss_entry_to_raw(gallery)
+    assert raw.meta["media_type"] == "gallery" and raw.community.post_kind == "media"
+    assert raw.image_candidates[0] == ("reddit_preview", "https://i.redd.it/bcrjsh1hxkrh1.png")
+
+
+def test_better_image_candidate_reopens_cached_image(db):
+    from radar.db.models import Image
+    source = Source(kind="reddit", name="r", identifier="homelab", config={})
+    db.add(source); db.flush()
+    raw = _reddit_raw("h1", "My homelab rack build", "homelab", None, rank=0)
+    raw.add_image("reddit_thumb", "https://preview.redd.it/abc123.jpg?width=140&s=x")
+    ingest_items(db, source, [raw])
+    item = db.query(Item).one()
+    image = Image(original_url="https://preview.redd.it/abc123.jpg?width=140&s=x", url_hash="h" * 40,
+                  kind="reddit_thumb", status="ok", width=140, height=120, cache_path="ab/abc.webp")
+    db.add(image); db.flush()
+    item.image_id, item.image_url, item.image_state = image.id, image.original_url, "done"
+    ingest_items(db, source, [raw])  # same candidates: nothing to do
+    assert item.image_state == "done"
+    better = _reddit_raw("h1", "My homelab rack build", "homelab", None, rank=0)
+    better.add_image("reddit_preview", "https://i.redd.it/abc123.jpg")
+    better.add_image("reddit_thumb", "https://preview.redd.it/abc123.jpg?width=140&s=x")
+    ingest_items(db, source, [better])
+    assert item.image_state == "pending"  # the full-size original outranks the cached thumbnail
+    from radar.api.serializers import item_dict
+    assert item_dict(db, item)["image"] == {"url": f"/media/{image.id}", "width": 140, "height": 120}

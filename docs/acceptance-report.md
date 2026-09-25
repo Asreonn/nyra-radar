@@ -90,3 +90,11 @@ Measured in a fresh scratch database (hash embeddings, no LLM) against the live 
 - Tune page returned 12 posts from 12 different subreddits/sources; two ratings updated the counter and the learned profile.
 - Negative taste: three "not interested" crypto posts pushed a new crypto post's `semantic_preference` below an unrelated one (test).
 - Automated checks: Ruff clean; Pytest 18 passed; `scripts/ui_check.py` passes on Today and Reddit at 360×800, 412×915 and 1920×1080 (no overflow, 44 px phone targets).
+
+## Addendum — Nyra palette, Reddit media and compact comments (2026-09-25)
+
+- Palette and typeface taken from Nyra (`Asreonn/nyra` `src/index.css`): dark first, accent `#b79bff` (light `#6d4dff`), Noto Sans.
+- Reddit media: Atom thumbnails on `preview.redd.it/<id>` are upgraded to the original `i.redd.it/<id>` (140×132 → 1194×1134 in the probe); already-cached thumbnails are re-fetched when the better candidate appears. After one re-collection 50 Reddit posts carried full-size images; tall images render with a blurred fill.
+- Detail: full Reddit text; comments compact (3 top-level shown, 24 folded reply threads on a 60-comment HN thread, "Show more" → all 60, "Read more" unclamps); lightbox opens and closes with Esc; infinite scroll 30 → 60 posts; `j`/`k` focus and `?` help work.
+- Fixed a latent import cycle (normalize → clustering package → clustering.service → normalize) that broke `import radar.services.collect` when imported first.
+- Automated checks: Ruff clean; Pytest 20 passed; `scripts/ui_check.py` passes on Today and Reddit at 360×800, 412×915 and 1920×1080.
