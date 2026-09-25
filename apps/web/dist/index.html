@@ -3,79 +3,66 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0d0e10">
-  <meta name="color-scheme" content="dark light">
+  <meta name="color-scheme" content="light dark">
   <title>Nyra Radar</title>
   <script>
-    try { const t = localStorage.getItem('radar-theme'); if (t === 'light' || (!t && matchMedia('(prefers-color-scheme: light)').matches)) document.documentElement.classList.add('light'); } catch (e) {}
+    try { const t = localStorage.getItem('radar-theme'); if (t === 'dark' || (!t && matchMedia('(prefers-color-scheme: dark)').matches)) document.documentElement.classList.add('dark'); } catch (e) {}
   </script>
   <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
     <defs>
-      <symbol id="i-home" viewBox="0 0 24 24"><path d="M3.5 10.2 12 3.5l8.5 6.7V20a.5.5 0 0 1-.5.5h-5v-6h-6v6H4a.5.5 0 0 1-.5-.5z"/></symbol>
-      <symbol id="i-reddit" viewBox="0 0 24 24"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v10a1.5 1.5 0 0 1-1.5 1.5H10l-5 4v-4h-.5A.5.5 0 0 1 4 16.5z"/><path d="M12 14V8m-3 3 3-3 3 3"/></symbol>
-      <symbol id="i-hn" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><path d="m8.5 8 3.5 5 3.5-5M12 13v4"/></symbol>
-      <symbol id="i-explore" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></symbol>
-      <symbol id="i-projects" viewBox="0 0 24 24"><circle cx="6.5" cy="6" r="2.2"/><circle cx="6.5" cy="18" r="2.2"/><circle cx="17.5" cy="8" r="2.2"/><path d="M6.5 8.2v7.6M17.5 10.2c0 3.8-5 3.3-9.4 6.3"/></symbol>
-      <symbol id="i-saved" viewBox="0 0 24 24"><path d="M6.5 3.5h11v17l-5.5-4-5.5 4z"/></symbol>
-      <symbol id="i-history" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
-      <symbol id="i-sources" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.6"/><path d="M8.2 15.8a5.4 5.4 0 0 1 0-7.6m7.6 0a5.4 5.4 0 0 1 0 7.6M5.4 18.6a9.3 9.3 0 0 1 0-13.2m13.2 0a9.3 9.3 0 0 1 0 13.2"/></symbol>
-      <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h9m4 0h3M4 17h3m4 0h9M4 12h13m3 0h0"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/><circle cx="19" cy="12" r="1.2"/></symbol>
-      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.5 15.5 5 5"/></symbol>
-      <symbol id="i-theme" viewBox="0 0 24 24"><path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z"/></symbol>
-      <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 4.5 19 12h-4v7.5H9V12H5z"/></symbol>
-      <symbol id="i-comment" viewBox="0 0 24 24"><path d="M4.5 6A1.5 1.5 0 0 1 6 4.5h12A1.5 1.5 0 0 1 19.5 6v9a1.5 1.5 0 0 1-1.5 1.5H10l-4.5 3.5v-3.5A1 1 0 0 1 4.5 15.5z"/></symbol>
-      <symbol id="i-out" viewBox="0 0 24 24"><path d="M13.5 4.5h6v6M19.5 4.5 11 13M18 14v4.5a1 1 0 0 1-1 1H5.5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1H10"/></symbol>
-      <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 19.5s-7.5-4.6-7.5-10.2A4.2 4.2 0 0 1 12 6.8a4.2 4.2 0 0 1 7.5 2.5c0 5.6-7.5 10.2-7.5 10.2z"/></symbol>
-      <symbol id="i-x" viewBox="0 0 24 24"><path d="m6.5 6.5 11 11m0-11-11 11"/></symbol>
-      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4.5v4h-4"/></symbol>
+      <symbol id="i-up" viewBox="0 0 24 24"><path d="M7.5 10.5V20h-3v-9.5zM7.5 10.5 11.3 4a1.8 1.8 0 0 1 3.2 1.3l-.6 4h4.6a2 2 0 0 1 2 2.4l-1.3 6.6a2 2 0 0 1-2 1.7H7.5"/></symbol>
+      <symbol id="i-down" viewBox="0 0 24 24"><g transform="rotate(180 12 12)"><path d="M7.5 10.5V20h-3v-9.5zM7.5 10.5 11.3 4a1.8 1.8 0 0 1 3.2 1.3l-.6 4h4.6a2 2 0 0 1 2 2.4l-1.3 6.6a2 2 0 0 1-2 1.7H7.5"/></g></symbol>
+      <symbol id="i-save" viewBox="0 0 24 24"><path d="M7 4h10v16l-5-3.6L7 20z"/></symbol>
+      <symbol id="i-hide" viewBox="0 0 24 24"><path d="M3.5 12s3-6 8.5-6 8.5 6 8.5 6-3 6-8.5 6-8.5-6-8.5-6z"/><circle cx="12" cy="12" r="2.5"/><path d="m4 4 16 16"/></symbol>
+      <symbol id="i-comment" viewBox="0 0 24 24"><path d="M5 5.5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8l-4.5 3.5v-3.5H5a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z"/></symbol>
+      <symbol id="i-out" viewBox="0 0 24 24"><path d="M13.5 5H19v5.5M19 5l-8 8M17.5 14v4.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1H10"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></symbol>
+      <symbol id="i-theme" viewBox="0 0 24 24"><path d="M19 14.5A7.5 7.5 0 0 1 9.5 5a7.5 7.5 0 1 0 9.5 9.5z"/></symbol>
+      <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18.5" cy="12" r="1.3"/></symbol>
       <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5.5m5.5-6-6 6 6 6"/></symbol>
-      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
-      <symbol id="i-cards" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/></symbol>
-      <symbol id="i-list" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
-      <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 4 2.4 5 5.4.6-4 3.7 1.1 5.4L12 16l-4.9 2.7 1.1-5.4-4-3.7 5.4-.6z"/></symbol>
-      <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3.5 5.5 13.5H12l-1 7 7.5-10H12z"/></symbol>
+      <symbol id="i-today" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4m6-4v4"/></symbol>
+      <symbol id="i-reddit" viewBox="0 0 24 24"><path d="M5 5.5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8l-4.5 3.5v-3.5H5a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z"/><path d="M12 13.5v-5m-2.3 2.3L12 8.5l2.3 2.3"/></symbol>
+      <symbol id="i-hn" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8.5 8 3.5 5 3.5-5M12 13v4"/></symbol>
     </defs>
   </svg>
-  <a class="skip" href="#main">Skip to content</a>
-  <header class="topbar">
-    <a class="brand" href="#/today" aria-label="Nyra Radar home"><span class="brand-mark" aria-hidden="true"><i></i></span><span class="brand-name">Nyra <b>Radar</b></span></a>
-    <label class="search"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg><input id="search" type="search" placeholder="Search Reddit, HN, projects, stories…" autocomplete="off" aria-label="Search"><kbd>/</kbd></label>
-    <div class="top-actions">
-      <button id="theme" class="icon-button" title="Toggle theme" aria-label="Toggle theme"><svg class="ico"><use href="#i-theme"/></svg></button>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="top">
+    <div class="top-inner">
+      <a class="brand" href="#/today" data-fresh="1" aria-label="Nyra Radar home"><i></i>Radar</a>
+      <nav class="tabs" aria-label="Primary">
+        <a href="#/today" data-route="today" data-fresh="1">Today</a>
+        <a href="#/reddit" data-route="reddit" data-fresh="1">Reddit</a>
+        <a href="#/hn" data-route="hn" data-fresh="1">Hacker News</a>
+        <a href="#/saved" data-route="saved" data-fresh="1">Saved</a>
+      </nav>
+      <div class="top-actions">
+        <label class="search"><svg class="ico" aria-hidden="true"><use href="#i-search"/></svg><input id="search" type="search" placeholder="Search" autocomplete="off" aria-label="Search"></label>
+        <button class="icon-btn" id="search-toggle" aria-label="Search"><svg class="ico"><use href="#i-search"/></svg></button>
+        <button class="icon-btn" id="theme" aria-label="Toggle dark mode" title="Dark / light"><svg class="ico"><use href="#i-theme"/></svg></button>
+        <details class="menu">
+          <summary class="icon-btn" aria-label="More pages"><svg class="ico"><use href="#i-more"/></svg></summary>
+          <div class="menu-pop" role="menu">
+            <a href="#/tune" data-fresh="1">Tune your feed</a>
+            <a href="#/explore" data-fresh="1">Everything collected</a>
+            <a href="#/projects" data-fresh="1">Open-source projects</a>
+            <a href="#/history" data-fresh="1">History</a>
+            <hr>
+            <a href="#/settings" data-fresh="1">Settings</a>
+            <a href="#/sources" data-fresh="1">Sources</a>
+          </div>
+        </details>
+      </div>
     </div>
   </header>
-  <div class="shell">
-    <nav class="sidebar" aria-label="Primary">
-      <div class="nav-group">
-        <a href="#/today" data-route="today"><svg class="ico"><use href="#i-home"/></svg><span>Today</span></a>
-        <a href="#/reddit" data-route="reddit" class="nav-reddit"><svg class="ico"><use href="#i-reddit"/></svg><span>Reddit</span><em id="reddit-count"></em></a>
-        <a href="#/hn" data-route="hn"><svg class="ico"><use href="#i-hn"/></svg><span>Hacker News</span></a>
-        <a href="#/explore" data-route="explore"><svg class="ico"><use href="#i-explore"/></svg><span>Explore</span></a>
-        <a href="#/projects" data-route="projects"><svg class="ico"><use href="#i-projects"/></svg><span>Projects</span></a>
-        <a href="#/saved" data-route="saved"><svg class="ico"><use href="#i-saved"/></svg><span>Saved</span></a>
-        <a href="#/history" data-route="history"><svg class="ico"><use href="#i-history"/></svg><span>History</span></a>
-      </div>
-      <div class="nav-subs" id="nav-subs" hidden>
-        <div class="nav-label">Subreddits</div>
-        <div id="nav-subs-list"></div>
-      </div>
-      <div class="nav-group nav-bottom">
-        <a href="#/sources" data-route="sources"><svg class="ico"><use href="#i-sources"/></svg><span>Sources</span></a>
-        <a href="#/settings" data-route="settings"><svg class="ico"><use href="#i-settings"/></svg><span>Settings</span></a>
-      </div>
-      <div id="system-pill" class="system-pill"><i></i><span>Connecting</span></div>
-    </nav>
-    <main id="main" tabindex="-1"></main>
-  </div>
-  <nav class="mobile-nav" aria-label="Mobile primary">
-    <a href="#/today" data-route="today"><svg class="ico"><use href="#i-home"/></svg><span>Today</span></a>
-    <a href="#/reddit" data-route="reddit"><svg class="ico"><use href="#i-reddit"/></svg><span>Reddit</span></a>
-    <a href="#/hn" data-route="hn"><svg class="ico"><use href="#i-hn"/></svg><span>HN</span></a>
-    <a href="#/explore" data-route="explore"><svg class="ico"><use href="#i-explore"/></svg><span>Explore</span></a>
-    <a href="#/saved" data-route="saved"><svg class="ico"><use href="#i-saved"/></svg><span>Saved</span></a>
+  <main id="main" tabindex="-1"></main>
+  <nav class="bottom-nav" aria-label="Primary (mobile)">
+    <a href="#/today" data-route="today" data-fresh="1"><svg class="ico"><use href="#i-today"/></svg>Today</a>
+    <a href="#/reddit" data-route="reddit" data-fresh="1"><svg class="ico"><use href="#i-reddit"/></svg>Reddit</a>
+    <a href="#/hn" data-route="hn" data-fresh="1"><svg class="ico"><use href="#i-hn"/></svg>HN</a>
+    <a href="#/saved" data-route="saved" data-fresh="1"><svg class="ico"><use href="#i-save"/></svg>Saved</a>
   </nav>
   <div id="toast" role="status" aria-live="polite"></div>
   <script type="module" src="/assets/app.js"></script>

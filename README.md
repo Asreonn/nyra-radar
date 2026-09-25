@@ -2,7 +2,7 @@
 
 Nyra Radar is a self-hosted personal technology intelligence radar and open-source discovery engine. It continuously collects from heterogeneous sources, preserves raw sightings, extracts and clusters coverage, treats repositories as evolving projects, learns explicit preferences, and reserves feed capacity for exploration.
 
-It is deliberately not an RSS inbox: the main unit is a ranked story or project signal, while the complete unranked collection remains manually browsable. Reddit is the primary community source: Today opens with the hottest threads from your subreddits, and a dedicated Reddit view lets you browse them like Reddit itself (hot/top/new/discussed, per subreddit, with the discussion thread inline). Hacker News stays alongside as a ranked rail and its own view.
+It is deliberately not an RSS inbox: the main unit is a ranked story or project signal, while the complete unranked collection remains manually browsable. Reddit is the primary community source: Today opens with the best threads from your subreddits, and a dedicated Reddit view lets you browse them like Reddit itself (hot/top/new/discussed, per subreddit, with the discussion thread inline). Hacker News follows as its own section and view. The UI is a single, quiet reading column.
 
 ## Current installation
 
@@ -54,7 +54,20 @@ Collection is idempotent. URL canonicalization removes tracking and normalizes c
 
 Deduplication and clustering are layered: canonical URL, linked target, normalized title, SimHash, then embedding cosine similarity in a time window. A multi-source cluster appears once in the home feed and exposes every report in its Coverage section.
 
-Ranking stores every normalized component and evidence in `item_scores`: interest, semantic preference (similarity to your liked/saved items), freshness, novelty, source quality/affinity, content type (`ranking.content_type_preference`, Reddit 0.8 / HN 0.65 by default), community signal (normalized per subreddit, or the hot/top listing position when votes are unknown), project momentum, coverage, optional LLM quality, duplicate/spam penalties, and ignored-item decay. Feed construction applies explicit section budgets — `reddit` (30% by default) first — per-subreddit and per-domain diversity, and caps Reddit at half of each other section; `adjacent` and `wildcard` retain serendipity. The Settings view has sliders for the Reddit share and the per-type preferences.
+Ranking stores every normalized component and evidence in `item_scores`: interest, semantic preference (similarity percentile to your liked/saved items, pulled down by similarity to items you marked "less like this"), freshness, novelty, source quality/affinity, content type (`ranking.content_type_preference`, Reddit 0.8 / HN 0.65 by default), community signal (normalized per subreddit, or the hot/top listing position when votes are unknown), project momentum, coverage, optional LLM quality, duplicate/spam penalties, and ignored-item decay. Feed construction applies explicit section budgets — `reddit` (30% by default) first — per-subreddit and per-domain diversity, and caps Reddit at half of each other section; `adjacent` and `wildcard` retain serendipity. The Settings view has sliders for the Reddit share and the per-type preferences.
+
+## Teaching Radar what you want
+
+Every post has four quiet controls: 👍 **More like this**, 👎 **Less like this**, **Save**, and **Hide** (no opinion). After 👎 Radar asks *why*, and each answer teaches something different:
+
+| Answer | Learns |
+|---|---|
+| Not interested in this | topic interests + negative taste example |
+| Less from r/… / site | only that subreddit's (or site's) affinity, strongly |
+| Low quality / clickbait | source affinity + negative taste example |
+| Already seen it | nothing — just hidden |
+
+Everything can be undone (`{"action": "undo"}` appends an inverse event, so the log stays append-only). **Tune your feed** (`#/tune`, `GET /api/v1/tune`) shows a dozen recent posts spread across all subreddits and sources to rate quickly. Each post's detail page explains *why you're seeing it* in plain sentences, and **Settings → What Radar has learned** (`GET /api/v1/profile`) lists the subreddits, sites and topics it now favours or avoids.
 
 ## Reddit
 

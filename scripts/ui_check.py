@@ -46,10 +46,10 @@ async def check_size(ws, width: int, height: int, call_id: int, route: str) -> t
       route:location.hash, viewport:[innerWidth,innerHeight], scrollWidth:document.documentElement.scrollWidth,
       overflow:document.documentElement.scrollWidth>innerWidth,
       title:document.querySelector('h1')?.textContent,
-      cards:document.querySelectorAll('.lead,.mini,.post,.row,.news').length,
-      redditCards:document.querySelectorAll('.lead,.mini,.post').length,
-      navVisible:getComputedStyle(document.querySelector('.mobile-nav')).display !== 'none',
-      minCoreControl:Math.min(...[...document.querySelectorAll('.mobile-nav a,.post-foot .pill-btn,.row-actions .pill-btn')]
+      cards:document.querySelectorAll('.entry').length,
+      redditCards:[...document.querySelectorAll('.entry .meta .src')].filter(x=>x.textContent.startsWith('r/')).length,
+      navVisible:getComputedStyle(document.querySelector('.bottom-nav')).display !== 'none',
+      minCoreControl:Math.min(...[...document.querySelectorAll('.bottom-nav a,.entry .act')]
         .filter(x=>getComputedStyle(x).display!=='none' && x.getBoundingClientRect().width>0)
         .map(x=>Math.min(x.getBoundingClientRect().width,x.getBoundingClientRect().height)))
     })"""

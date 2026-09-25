@@ -43,9 +43,10 @@ from radar.services.community import (
     mask_feed_url,
     normalize_subreddit,
 )
-from radar.services.feedback import explain_interests, fold_events, record
+from radar.services.feedback import explain_interests, fold_events, record, undo_last
 from radar.services.search import hybrid
 from radar.services.settings import all_values, set_value
+from radar.services.taste import profile, tune_candidates, why
 from radar.util import iso, redact_feed_tokens, utcnow
 
 BODY_REQUIRED = Body(...)
@@ -157,7 +158,7 @@ def get_item(item_id: int, db: DB) -> dict:
     item = db.get(Item, item_id)
     if item is None:
         raise HTTPException(404, "item not found")
-    return {"item": item_dict(db, item, detail=True)}
+    return {"item": {**item_dict(db, item, detail=True), "why": why(db, item)}}
 
 
 @app.get("/api/v1/items/{item_id}/comments")
@@ -304,14 +305,35 @@ def feedback(item_id: int, db: DB, payload: dict[str, Any] = BODY_REQUIRED) -> d
     if item is None:
         raise HTTPException(404, "item not found")
     action = str(payload.get("action", ""))
+    context = dict(payload.get("context") or {})
     try:
-        event = record(db, item, action, payload.get("context"))
+        if action == "undo":
+            event = undo_last(db, item)
+            if event is None:
+                raise ValueError("nothing to undo")
+        else:
+            if context.pop("refine", False):  # e.g. a reason chosen right after "less like this"
+                undo_last(db, item)
+            event = record(db, item, action, context)
+        db.flush()
         fold_events(db)
         score_item(db, item)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return {"ok": True, "event_id": event.id, "item_id": item_id, "action": action,
             "user": item_dict(db, item)["user"]}
+
+
+@app.get("/api/v1/tune")
+def tune(db: DB, limit: int = Query(12, ge=1, le=40)) -> dict:
+    """A diverse sample of recent unrated posts to rate (the "Tune your feed" page)."""
+    return {"items": [item_dict(db, x) for x in tune_candidates(db, limit)]}
+
+
+@app.get("/api/v1/profile")
+def taste_profile(db: DB) -> dict:
+    """What Radar has learned from feedback, in plain terms."""
+    return profile(db)
 
 
 @app.post("/api/v1/items/{item_id}/save")

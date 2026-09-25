@@ -83,3 +83,10 @@ Measured in a fresh scratch database (hash embeddings, no LLM) against the live 
 - Account connect: an invalid feed token yields 403 on the upvoted/saved feeds (reported in the account card); tokens are redacted from identifiers, stored errors and API responses.
 - Automated checks: Ruff clean; Pytest 13 passed (adds Atom parsing, JSON→RSS fallback with memo, vote preservation, Reddit section and per-subreddit cap, community sorts, comments/sources API, account signals and taste profile); `scripts/ui_check.py` passes on Today and Reddit at 360×800, 412×915 and 1920×1080 with no overflow and 44 px phone touch targets.
 - Screenshots: `docs/screenshots/radar-1920x1080.png`, `radar-360x800.png`, `radar-412x915.png`, `radar-reddit.png`, `radar-story-coverage.png`.
+
+## Addendum — feedback and minimal UI (2026-09-25)
+
+- Feedback: 👍 / 👎 with reasons (topic, source, quality, seen) / save / hide / undo, verified in Chromium: a "Less from r/LocalLLaMA" answer removed the post after 3.5 s and moved r/LocalLLaMA into *Less from* in Settings; Hide → Undo restored the post; the like toggle round-trips through `undo`.
+- Tune page returned 12 posts from 12 different subreddits/sources; two ratings updated the counter and the learned profile.
+- Negative taste: three "not interested" crypto posts pushed a new crypto post's `semantic_preference` below an unrelated one (test).
+- Automated checks: Ruff clean; Pytest 18 passed; `scripts/ui_check.py` passes on Today and Reddit at 360×800, 412×915 and 1920×1080 (no overflow, 44 px phone targets).

@@ -4,7 +4,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from radar.db.models import CommunityPost, Enrichment, Item, ItemScore, Repository, StoryCluster
+from radar.db.models import CommunityPost, Enrichment, Item, ItemScore, Repository, SavedItem, StoryCluster
 from radar.services.community import community_info
 from radar.util import html_to_text, iso
 
@@ -34,7 +34,8 @@ def item_dict(session: Session, item: Item, *, detail: bool = False) -> dict:
                    if item.source else None),
         "cluster_id": item.cluster_id, "repository_id": item.repository_id,
         "external": {"score": item.external_score, "comments": item.external_comment_count},
-        "user": {"vote": item.user_vote, "read": item.is_read, "hidden": item.is_hidden},
+        "user": {"vote": item.user_vote, "read": item.is_read, "hidden": item.is_hidden,
+                 "saved": session.scalar(select(SavedItem.id).where(SavedItem.item_id == item.id)) is not None},
         "score": ({"total": score.final_score, "importance": score.importance, "novelty": score.novelty,
                    "interest": score.interest, "community": score.community, "momentum": score.momentum,
                    "components": score.components, "evidence": score.evidence} if score else None),
