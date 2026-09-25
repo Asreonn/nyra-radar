@@ -1,9 +1,11 @@
 [Unit]
+PartOf=nyra-radar.target
 Description=Nyra Radar collection and enrichment worker
 After=network-online.target nyra-radar-api.service
 Wants=network-online.target
 
 [Service]
+TimeoutStopSec=20
 Type=simple
 WorkingDirectory=/home/asreonn/Apps/nyra-radar
 ExecStart=/home/asreonn/Apps/nyra-radar/.venv/bin/radar worker
