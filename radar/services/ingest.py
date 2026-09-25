@@ -89,7 +89,8 @@ def _update_existing(item: Item, norm: Normalized, source: Source | None) -> boo
     if f.get("meta"):
         merged = dict(item.meta or {})
         for k, v in f["meta"].items():
-            if k not in merged or k in ("image_candidates", "reddit_sort", "hn_list", "views", "ossinsight"):
+            if k not in merged or k in ("image_candidates", "reddit_sort", "reddit_rank", "reddit_listing_size",
+                                        "reddit_seen_at", "hn_list", "views", "ossinsight"):
                 merged[k] = v
         if merged != item.meta:
             item.meta = merged
@@ -110,13 +111,18 @@ def _upsert_community(session: Session, item: Item, raw: RawItem) -> None:
                              post_id=info.post_id or item.source_item_id or str(item.id),
                              discussion_url=info.discussion_url, score_history=[])
         session.add(post)
-    post.score = info.score
-    post.num_comments = info.num_comments
-    post.upvote_ratio = info.upvote_ratio
-    post.flair = info.flair
+    # Feeds without vote counts (Reddit Atom) must not erase counts learned from the API.
+    for attr in ("score", "num_comments", "upvote_ratio", "flair"):
+        value = getattr(info, attr)
+        if value is not None:
+            setattr(post, attr, value)
+    if info.community:
+        post.community = info.community
     post.is_self = info.is_self
     post.post_kind = info.post_kind
     post.linked_url = item.link_url
+    if info.score is None:
+        return
     history = list(post.score_history or [])
     last = history[-1] if history else None
     if not last or (last[1], last[2]) != (info.score, info.num_comments):

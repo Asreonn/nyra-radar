@@ -26,7 +26,7 @@ from radar.normalization.models import IMAGE_PRIORITY
 log = logging.getLogger(__name__)
 PILImage.MAX_IMAGE_PIXELS = 40_000_000
 
-MIN_DIMS = {"site_icon": (48, 48)}
+MIN_DIMS = {"site_icon": (48, 48), "reddit_thumb": (96, 64)}
 DEFAULT_MIN = (160, 80)
 BADGE_HOSTS = ("shields.io", "badgen.net", "badge.fury.io", "travis-ci", "codecov.io", "circleci.com",
                "github.com/.*/workflows", "img.shields", "star-history.com", "api.star-history",

@@ -76,6 +76,31 @@ def strip_html(value: str | None) -> str:
     return normalize_ws(html.unescape(text))
 
 
+def html_to_text(value: str | None) -> str:
+    """Community HTML (Reddit, HN) to plain text that keeps paragraphs, list items and quotes readable."""
+    if not value:
+        return ""
+    text = re.sub(r"<!--.*?-->", "", value, flags=re.DOTALL)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)<p(\s[^>]*)?>", "\n\n", text)
+    text = re.sub(r"(?i)<li[^>]*>", "\n• ", text)
+    text = re.sub(r"(?i)<blockquote[^>]*>", "\n> ", text)
+    text = re.sub(r"(?i)</li>", "", text)
+    text = re.sub(r"(?i)</(p|div|ul|ol|pre|blockquote|h[1-6]|tr|table)>", "\n\n", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = html.unescape(text).replace("\u200b", "")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+_FEED_SECRET = re.compile(r"([?&](?:feed|token)=)[^&#\s;]+")
+
+
+def redact_feed_tokens(text: str | None) -> str | None:
+    """Mask private feed tokens (reddit.com/prefs/feeds) in URLs, identifiers and error text."""
+    return _FEED_SECRET.sub(r"\1•••", text) if text else text
+
+
 def normalize_ws(value: str | None) -> str:
     return _WS.sub(" ", value or "").strip()
 

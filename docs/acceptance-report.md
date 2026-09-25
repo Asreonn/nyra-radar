@@ -71,3 +71,15 @@ Manual UI routes cover complete paginated collection browsing, query search, con
 - Ruff: clean.
 - Pytest: 5 passed (canonical URL, GitHub parsing, idempotent sightings, clustering/feed dedup, preference learning, stable API contract).
 - Chromium responsive assertions: 3/3 passed.
+
+## Addendum — Reddit-first update (2026-09-25)
+
+Measured in a fresh scratch database (hash embeddings, no LLM) against the live sources:
+
+- Reddit access probe: `old.reddit.com` JSON and RSS now answer `302 → /login?reason=lor2`, `www.reddit.com/*.json` answers 403, and `www.reddit.com/r/<sub>/<sort>/.rss` answers 200 with a descriptive User-Agent (browser-like agents hit 429 sooner).
+- Collection: 18 seed sources, 407 observations, 398 new items. All 9 Reddit sources succeeded via Atom (242 posts); previously every Reddit source failed. The blocked JSON endpoint is skipped for six hours after the first login redirect. GitHub search/trending failed in this sandbox (rate limit/403), unrelated to this change.
+- Discussion threads: 8/8 top Reddit candidates cached via the thread Atom feed; HN threads load through Algolia.
+- Mixed 48-item digest: a 14-thread `reddit` section across 8 subreddits leads; Reddit fills at most half of every other section, so Hacker News appears in *For you*, *Top stories* and *Off the beaten path*, alongside the 10-item HN rail.
+- Account connect: an invalid feed token yields 403 on the upvoted/saved feeds (reported in the account card); tokens are redacted from identifiers, stored errors and API responses.
+- Automated checks: Ruff clean; Pytest 13 passed (adds Atom parsing, JSON→RSS fallback with memo, vote preservation, Reddit section and per-subreddit cap, community sorts, comments/sources API, account signals and taste profile); `scripts/ui_check.py` passes on Today and Reddit at 360×800, 412×915 and 1920×1080 with no overflow and 44 px phone touch targets.
+- Screenshots: `docs/screenshots/radar-1920x1080.png`, `radar-360x800.png`, `radar-412x915.png`, `radar-reddit.png`, `radar-story-coverage.png`.

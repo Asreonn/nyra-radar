@@ -93,12 +93,17 @@ systemd unit; it runs through `~/Apps/nyra/nyra.sh`. Radar adds `nyra-radar-api.
 | YouTube channel RSS | 200 |
 | GDELT doc API | 200 (slow) |
 | **Reddit `www.reddit.com/*.json`** | **403** without OAuth |
-| Reddit `old.reddit.com/*.json` with a browser-like UA | **200** |
-| Reddit `.rss` | 200, but **429** after 2–3 quick requests |
+| Reddit `old.reddit.com/*.json` and `old.reddit.com/*.rss` | originally 200; by 2026-09-25 **302 → login** (`reason=lor2`) |
+| Reddit `www.reddit.com/r/<sub>/<sort>/.rss` with a descriptive UA | **200** (browser-like UAs get **429** much sooner) |
+| Reddit thread feed `www.reddit.com/r/<sub>/comments/<id>/.rss` | **200** (post + top-level comments, no votes) |
 
-Decision: the Reddit collector uses `old.reddit.com` JSON with strict per-host pacing
-(1 request / 3 s). It falls back to RSS, and uses OAuth (`oauth.reddit.com`) automatically
-if a client id/secret is configured.
+Decision (revised 2026-09-25): the Reddit collector tries OAuth (`oauth.reddit.com`) when a
+client id/secret is configured, then `old.reddit.com` JSON, then the `www.reddit.com` Atom feed
+with the agent `linux:nyra-radar:0.2 (…)`. A login redirect or 403 on anonymous JSON is
+remembered per source for six hours (`Source.state.json_blocked_until`) so the paced request
+budget (1 request / 3 s per host) is spent on the feed that works. Atom has no vote or comment
+counts; the post's position in the hot/top listing is stored instead and used as the
+engagement signal.
 
 ## Directories Radar uses
 

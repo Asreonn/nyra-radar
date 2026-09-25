@@ -13,6 +13,7 @@ from radar.config import Config
 from radar.db.models import FetchLog, Source
 from radar.net import Http
 from radar.services.ingest import IngestStats, ingest_items
+from radar.services.reddit_account import apply_account_signals
 from radar.services.settings import get as get_setting
 from radar.util import utcnow
 
@@ -23,6 +24,13 @@ DEFAULT_SOURCES = (
      {"sorts": ["hot", "new"], "min_score": 3}),
     ("reddit", "Reddit · selfhosted", "selfhosted", "https://reddit.com/r/selfhosted", {}),
     ("reddit", "Reddit · opensource", "opensource", "https://reddit.com/r/opensource", {}),
+    ("reddit", "Reddit · linux", "linux", "https://reddit.com/r/linux", {}),
+    ("reddit", "Reddit · programming", "programming", "https://reddit.com/r/programming", {}),
+    ("reddit", "Reddit · technology", "technology", "https://reddit.com/r/technology",
+     {"sorts": ["top"], "t": "day"}),
+    ("reddit", "Reddit · MachineLearning", "MachineLearning", "https://reddit.com/r/MachineLearning", {}),
+    ("reddit", "Reddit · ClaudeAI", "ClaudeAI", "https://reddit.com/r/ClaudeAI", {}),
+    ("reddit", "Reddit · homelab", "homelab", "https://reddit.com/r/homelab", {}),
     ("github_trending", "GitHub Trending · daily", "daily", "https://github.com/trending", {}),
     ("github_search", "GitHub · local AI", "local AI OR local LLM", "https://github.com/search",
      {"created_within_days": 30, "min_stars": 15}),
@@ -77,6 +85,8 @@ async def fetch_source(session: Session, source: Source, http: Http, config: Con
     try:
         result = await collector_cls(http, config).fetch(_spec(source))
         stats = ingest_items(session, source, result.items)
+        if (source.config or {}).get("account_signal"):
+            apply_account_signals(session, source, stats.touched_item_ids)
         source.successful_fetches += 1
         source.consecutive_failures = 0
         source.last_success_at = now

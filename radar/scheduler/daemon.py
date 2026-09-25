@@ -18,6 +18,7 @@ from radar.config import Config
 from radar.db import session_scope
 from radar.db.models import KV, Item, ModelUsage
 from radar.discovery.service import auto_start_trials, mine_candidates, review_trials
+from radar.enrichment.comments import prefetch_threads
 from radar.enrichment.pipeline import cache_images, extract_pending
 from radar.enrichment.service import enrich_candidates
 from radar.llm.client import LocalLLM
@@ -76,6 +77,9 @@ class Daemon:
                 result["embed"] = await embed_pending(session, self.embedder, limit=48)
             result["cluster"] = cluster_pending(session, limit=180)
             result["rank"] = rescore(session)
+            # Network-only (no model): keep the best Reddit/HN discussions ready to read.
+            result["comments"] = await prefetch_threads(
+                session, self.http, self.config, limit=int(get_setting(session, "pipeline.comments_per_cycle", 6)))
             if state.heavy_allowed:
                 result["images"] = await cache_images(session, self.http, self.config, limit=8)
                 result["projects"] = await hydrate_due(session, GitHubAPI(self.http, self.config), limit=3)

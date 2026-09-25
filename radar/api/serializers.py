@@ -4,8 +4,21 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from radar.db.models import Enrichment, Item, ItemScore, Repository, StoryCluster
-from radar.util import iso
+from radar.db.models import CommunityPost, Enrichment, Item, ItemScore, Repository, StoryCluster
+from radar.services.community import community_info
+from radar.util import html_to_text, iso
+
+HTML_BODY_TYPES = {"hackernews_post", "telegram_post"}
+
+
+def readable_body(item: Item) -> str | None:
+    """Post text with paragraphs intact (clean_text is whitespace-collapsed for indexing)."""
+    raw = item.raw_text
+    if not raw:
+        return None
+    if item.content_type in HTML_BODY_TYPES or raw.lstrip().startswith("<"):
+        return html_to_text(raw) or None
+    return raw.strip() or None
 
 
 def item_dict(session: Session, item: Item, *, detail: bool = False) -> dict:
@@ -27,6 +40,9 @@ def item_dict(session: Session, item: Item, *, detail: bool = False) -> dict:
                    "components": score.components, "evidence": score.evidence} if score else None),
         "why_it_matters": (item.meta or {}).get("why_it_matters"),
     }
+    community = session.get(CommunityPost, item.id)
+    if community:
+        out["community"] = community_info(community, item)
     if repo:
         out["repository"] = {
             "id": repo.id, "full_name": repo.display_name, "description": repo.description,
@@ -37,6 +53,7 @@ def item_dict(session: Session, item: Item, *, detail: bool = False) -> dict:
         }
     if detail:
         out["content"] = item.clean_text
+        out["body"] = readable_body(item) if community else None
         out["metadata"] = item.meta
         out["processing"] = {"extraction": item.extraction_state, "image": item.image_state,
                              "embedding": item.embedding_state, "cluster": item.cluster_state,

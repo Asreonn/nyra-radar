@@ -31,6 +31,7 @@ IMAGE_PRIORITY = (
     "twitter",
     "reddit_preview",
     "youtube_thumb",
+    "reddit_thumb",  # small listing thumbnail; last resort before feed images
     "feed",
     "site_icon",
 )
@@ -42,8 +43,8 @@ class CommunityInfo:
     post_id: str
     discussion_url: str
     community: str | None = None
-    score: int = 0
-    num_comments: int = 0
+    score: int | None = 0  # None = unknown (e.g. Reddit Atom feeds carry no votes)
+    num_comments: int | None = 0
     upvote_ratio: float | None = None
     flair: str | None = None
     is_self: bool = False

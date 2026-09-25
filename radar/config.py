@@ -229,7 +229,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "novelty": 0.7,
         "source_quality": 0.5,
         "source_affinity": 0.5,
-        "content_type_preference": 0.3,
+        "content_type_preference": 0.8,
         "community_signal": 0.9,
         "project_momentum": 0.9,
         "coverage": 0.6,
@@ -238,8 +238,17 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "spam_penalty": 2.5,
         "ignored_penalty": 0.4,
     },
-    # Feed budget for the Today/mixed digest. Normalised if it does not sum to 1.
-    "feed.budget": {"for_you": 0.55, "important": 0.15, "adjacent": 0.15, "oss": 0.10, "wildcard": 0.05},
+    # Prior per content type (0..1) for the `content_type_preference` component. Reddit is the
+    # primary community source; Hacker News stays a strong secondary one.
+    "ranking.content_type_preference": {"reddit_post": 0.8, "hackernews_post": 0.65, "github_repository": 0.6,
+                                        "github_release": 0.55, "default": 0.5},
+    # Feed budget for the Today/mixed digest. Normalised if it does not sum to 1. `reddit` is a
+    # dedicated Reddit section shown first on Today.
+    "feed.budget": {"reddit": 0.30, "for_you": 0.35, "important": 0.12, "adjacent": 0.10, "oss": 0.08,
+                    "wildcard": 0.05},
+    # At most this share of the feed may come from one subreddit (self posts otherwise all
+    # share the reddit.com domain and would be capped together).
+    "feed.max_per_community": 0.08,
     "feed.size": 40,
     "feed.freshness_half_life_hours": {"default": 30, "github_repository": 96, "github_release": 72,
                                        "youtube_video": 72, "website_change": 72},
@@ -250,7 +259,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "pipeline.llm_daily_budget": 400,
     "pipeline.extraction_batch": 30,
     "pipeline.embedding_batch": 64,
-    "pipeline.comments_per_cycle": 8,
+    "pipeline.comments_per_cycle": 6,
     "clustering.story_threshold": 0.84,
     "clustering.dup_threshold": 0.955,
     "clustering.window_hours": 96,

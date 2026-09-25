@@ -31,11 +31,22 @@ from radar.db.models import (
     StoryCluster,
 )
 from radar.discovery.service import decide_trial, start_trial
+from radar.enrichment.comments import get_thread
+from radar.net import Http
 from radar.ranking import build_feed, rescore, score_item
+from radar.services import reddit_account
+from radar.services.collect import fetch_source
+from radar.services.community import (
+    SORTS,
+    community_feed,
+    list_subreddits,
+    mask_feed_url,
+    normalize_subreddit,
+)
 from radar.services.feedback import explain_interests, fold_events, record
 from radar.services.search import hybrid
 from radar.services.settings import all_values, set_value
-from radar.util import iso, utcnow
+from radar.util import iso, redact_feed_tokens, utcnow
 
 BODY_REQUIRED = Body(...)
 BODY_OPTIONAL = Body(default={})
@@ -64,11 +75,26 @@ def db_session():
 DB = Annotated[Session, Depends(db_session)]
 
 
+_http: Http | None = None
+
+
+def api_http() -> Http:
+    """One paced HTTP client for on-demand fetches (discussion threads) from the API process."""
+    global _http
+    if _http is None:
+        _http = Http(max_concurrency=4)
+    return _http
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    global _http
     paths.ensure_dirs()
     migrate(get_engine())
     yield
+    if _http is not None:
+        await _http.close()
+        _http = None
 
 
 app = FastAPI(title="Nyra Radar", version="1.0.0", lifespan=lifespan,
@@ -132,6 +158,74 @@ def get_item(item_id: int, db: DB) -> dict:
     if item is None:
         raise HTTPException(404, "item not found")
     return {"item": item_dict(db, item, detail=True)}
+
+
+@app.get("/api/v1/items/{item_id}/comments")
+async def comments(item_id: int, db: DB, refresh: bool = False) -> dict:
+    item = db.get(Item, item_id)
+    if item is None:
+        raise HTTPException(404, "item not found")
+    thread = await get_thread(db, api_http(), get_config(), item, refresh=refresh)
+    return {"item_id": item_id, **thread}
+
+
+@app.get("/api/v1/communities")
+def communities(db: DB) -> dict:
+    """Configured and observed subreddits with counts and collection health."""
+    cfg = get_config().reddit
+    return {"platform": "reddit", "oauth": bool(cfg.client_id), "communities": list_subreddits(db)}
+
+
+@app.get("/api/v1/reddit/account")
+def reddit_account_status(db: DB) -> dict:
+    return reddit_account.status(db)
+
+
+@app.post("/api/v1/reddit/account")
+async def reddit_account_connect(db: DB, payload: dict[str, Any] = BODY_REQUIRED) -> dict:
+    """Connect with the private feed URL from reddit.com/prefs/feeds and run a first sync."""
+    try:
+        sources = reddit_account.connect(db, str(payload.get("feed_url", "")))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    db.commit()
+    return await _sync_account(db, sources)
+
+
+@app.post("/api/v1/reddit/account/sync")
+async def reddit_account_sync(db: DB) -> dict:
+    sources = reddit_account.account_sources(db)
+    if not sources:
+        raise HTTPException(404, "no Reddit account connected")
+    return await _sync_account(db, sources)
+
+
+async def _sync_account(db: Session, sources: list[Source]) -> dict:
+    results = {}
+    for source in sources:
+        stats = await fetch_source(db, source, api_http(), get_config())
+        results[source.config["account"]] = {"seen": stats.seen, "new": stats.new,
+                                              "error": redact_feed_tokens(source.last_error)}
+        db.commit()
+    rescore(db, days=30)
+    return {**reddit_account.status(db), "sync": results}
+
+
+@app.delete("/api/v1/reddit/account")
+def reddit_account_disconnect(db: DB) -> dict:
+    """Delete the account sources (and with them the stored feed token). Learned signals stay."""
+    return {"ok": True, "removed": reddit_account.disconnect(db)}
+
+
+@app.get("/api/v1/community")
+def community(db: DB, platform: str = Query("reddit", pattern="^(reddit|hackernews)$"),
+              community: str | None = None, sort: str = Query("hot", pattern="^(" + "|".join(SORTS) + ")$"),
+              period: str = "3d", limit: int = Query(50, le=200), offset: int = Query(0, ge=0)) -> dict:
+    """Reddit-style browsing: one subreddit (or a comma list, or all) sorted hot/top/new/discussed/best."""
+    items = community_feed(db, platform=platform, community=community, sort=sort,
+                           hours=_period_hours(period), limit=limit, offset=offset)
+    return {"platform": platform, "community": community, "sort": sort, "period": period,
+            "items": [item_dict(db, x) for x in items], "offset": offset, "limit": limit}
 
 
 @app.get("/api/v1/stories/{cluster_id}")
@@ -252,24 +346,34 @@ def interests(db: DB) -> dict:
 @app.get("/api/v1/sources")
 def sources(db: DB) -> dict:
     rows = db.scalars(select(Source).order_by(Source.status, Source.name)).all()
-    return {"sources": [{"id": s.id, "kind": s.kind, "name": s.name, "identifier": s.identifier,
+    return {"sources": [{"id": s.id, "kind": s.kind, "name": s.name, "identifier": mask_feed_url(s.identifier),
                          "url": s.url, "status": s.status, "origin": s.origin, "quality": s.quality,
+                         "access": (s.state or {}).get("last_access"),
                          "item_count": s.item_count, "duplicate_rate": s.duplicate_rate,
                          "last_success_at": iso(s.last_success_at), "next_fetch_at": iso(s.next_fetch_at),
-                         "last_error": s.last_error} for s in rows]}
+                         "last_error": redact_feed_tokens(s.last_error)} for s in rows]}
 
 
 @app.post("/api/v1/sources")
 def add_source(db: DB, payload: dict[str, Any] = BODY_REQUIRED) -> dict:
     kind = str(payload.get("kind", ""))
     identifier = str(payload.get("identifier", "")).strip()
+    name, url = payload.get("name"), payload.get("url")
+    if kind == "reddit":
+        identifier = normalize_subreddit(identifier) or ""
+        if not identifier:
+            raise HTTPException(422, "expected a subreddit name (r/LocalLLaMA) or a reddit.com feed URL")
+        feed = identifier.startswith("http")
+        name = name or ("Reddit · Front page" if feed else f"Reddit · {identifier}")
+        url = url or ("https://www.reddit.com" if feed else f"https://www.reddit.com/r/{identifier}")
     if kind not in COLLECTORS or not identifier:
         raise HTTPException(422, "valid collector kind and identifier are required")
-    existing = db.scalar(select(Source).where(Source.kind == kind, Source.identifier == identifier))
+    existing = db.scalar(select(Source).where(Source.kind == kind,
+                                              func.lower(Source.identifier) == identifier.lower()))
     if existing:
         raise HTTPException(409, "source already exists")
-    source = Source(kind=kind, identifier=identifier, name=str(payload.get("name") or identifier)[:200],
-                    url=payload.get("url"), config=payload.get("config") or {}, status="active", origin="manual")
+    source = Source(kind=kind, identifier=identifier, name=str(name or identifier)[:200],
+                    url=url, config=payload.get("config") or {}, status="active", origin="manual")
     db.add(source)
     db.flush()
     return {"ok": True, "source_id": source.id}
