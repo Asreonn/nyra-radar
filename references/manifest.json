@@ -1,0 +1,71 @@
+{
+  "_comment": "Reference/upstream projects. Source is cloned here for study only and is NOT part of the runtime. `reuse` records how Radar uses each project; scripts/update_notices.py regenerates THIRD_PARTY_NOTICES.md from this file and from the LICENSE file at the pinned commit.",
+  "projects": [
+    {
+      "name": "CondenseIt",
+      "repo": "wildlifechorus/condenseit",
+      "dir": "condenseit",
+      "commit": "a3129e1dda3245067d2b8db27e683b7555d18985",
+      "license_file": "LICENSE",
+      "license": "MIT",
+      "reuse": "adapted",
+      "adapted": [
+        "Exponential preference time decay with explicit/implicit event weights (radar/services/feedback.py)",
+        "og:image / twitter:image fallback order for article thumbnails (radar/extraction/metadata.py, reimplemented on lxml)"
+      ]
+    },
+    {
+      "name": "Horizon",
+      "repo": "Thysrael/Horizon",
+      "dir": "Horizon",
+      "commit": "74a70a29ac45ae9ce6d6f82c465452a157aa7a46",
+      "license_file": "LICENSE",
+      "license": "MIT",
+      "reuse": "adapted",
+      "adapted": [
+        "Tracking query-parameter stripping for URL identity keys (radar/extraction/canonical_url.py)",
+        "OSS Insight trends API usage and row field mapping (radar/collectors/github.py)",
+        "old.reddit.com fallback for unauthenticated Reddit access and t.me/s public channel preview parsing (radar/collectors/reddit.py, radar/collectors/telegram.py)"
+      ]
+    },
+    {
+      "name": "News Llama",
+      "repo": "slb350/news-llama",
+      "dir": "news-llama",
+      "commit": "8c07beacaaed915607ef6227187f5ddee4ccbfb7",
+      "license_file": "LICENSE",
+      "license": "MIT",
+      "reuse": "adapted",
+      "adapted": [
+        "Auditable candidate-to-trial-to-promotion source lifecycle and quality gating (radar/discovery/service.py)"
+      ]
+    },
+    {
+      "name": "Cruxwire",
+      "repo": "philoking/cruxwire",
+      "dir": "cruxwire",
+      "commit": "822944e33742a466eaadb5ff95852a4e34d5d206",
+      "license_file": "LICENSE",
+      "license": "MIT",
+      "reuse": "adapted",
+      "adapted": [
+        "Anchor-style time-windowed story clustering above a cosine threshold (radar/clustering/service.py)",
+        "Coverage-aware explainable score components and source diversity (radar/ranking/scorer.py)",
+        "Server-side source affinity learned from opens, saves, likes, dislikes and dismissals (radar/services/feedback.py)"
+      ]
+    },
+    {
+      "name": "YourRSS",
+      "repo": "XimilalaXiang/YourRSS",
+      "dir": "YourRSS",
+      "commit": "f809e0bec653e3ba99f41272da35dd7d0a39b945",
+      "license_file": null,
+      "license": "README states MIT, but the commit has no LICENSE file",
+      "reuse": "ideas-only",
+      "adapted": []
+    }
+  ],
+  "excluded": [
+    {"name": "InReader", "reason": "License unsuitable for unrestricted reuse. Not cloned, not consulted."}
+  ]
+}
