@@ -1,7 +1,7 @@
 """API and worker both seed default sources at boot; a concurrent insert must not crash either."""
 from sqlalchemy import select
 
-import radar.normalization.normalize  # noqa: F401  (entry-point import order; see note in commit)
+import radar.cli  # noqa: F401  (import like the real entry point; see note in commit 45b77e5)
 from radar.db.models import Source
 from radar.services.collect import DEFAULT_SOURCES, ensure_default_sources
 
