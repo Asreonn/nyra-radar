@@ -224,11 +224,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Ranking weights. Every component is normalised to [0, 1] before weighting.
     "ranking.weights": {
         "personal_interest": 1.6,
-        "semantic_preference": 1.0,
+        "semantic_preference": 1.8,
         "freshness": 1.0,
         "novelty": 0.7,
         "source_quality": 0.5,
-        "source_affinity": 0.5,
+        "source_affinity": 1.0,
         "content_type_preference": 0.8,
         "community_signal": 0.9,
         "project_momentum": 0.9,

@@ -20,6 +20,7 @@ from radar.db.models import (
     ItemTopic,
     Repository,
     SavedItem,
+    Source,
     SourcePreference,
     StoryCluster,
 )
@@ -79,63 +80,101 @@ def community_scales(session: Session, days: int = 7) -> dict[tuple[str, str], t
     return scales
 
 
-MIN_PROFILE_ITEMS = 3
+MIN_PROFILE_ITEMS = 2
+NEGATIVE_PULL = 0.8  # how strongly similarity to disliked items pulls semantic_preference down
+
+
+@dataclass
+class Taste:
+    """One side of the taste profile: centroid of example embeddings plus the sorted similarities
+    of every *other* item, so an item's similarity becomes a percentile."""
+    centroid: np.ndarray
+    reference: np.ndarray
+    size: int
+
+    def percentile(self, vector: np.ndarray) -> float:
+        # The epsilon absorbs float32 rounding so an item always counts its own reference entry.
+        similarity = float(vector @ self.centroid) + 1e-6
+        return float(np.searchsorted(self.reference, similarity, side="right")) / len(self.reference)
 
 
 @dataclass
 class RankContext:
-    """Per-rescore facts shared by every item: community scales and the taste profile."""
+    """Per-rescore facts shared by every item: community scales, taste profile, subreddit sources."""
     scales: dict[tuple[str, str], tuple[float, float]]
     index: VectorIndex | None = None
-    centroid: np.ndarray | None = None
-    reference: np.ndarray | None = None  # sorted similarities of all non-example items, for percentiles
-    profile_size: int = 0
+    liked: Taste | None = None
+    disliked: Taste | None = None
+    subreddit_sources: dict[str, int] | None = None
+
+    @property
+    def profile_size(self) -> int:
+        return (self.liked.size if self.liked else 0) + (self.disliked.size if self.disliked else 0)
 
 
-def taste_profile(session: Session) -> tuple[VectorIndex | None, np.ndarray | None, np.ndarray | None, int]:
-    """Centroid of the embeddings of liked and saved items (including Reddit upvotes/saves
-    imported from a connected account). `semantic_preference` is an item's similarity
-    percentile against it; with fewer than MIN_PROFILE_ITEMS examples it stays neutral."""
+def _taste(index: VectorIndex, ids: list[int], exclude: np.ndarray) -> Taste | None:
+    if len(ids) < MIN_PROFILE_ITEMS:
+        return None
+    _, vectors = index.vectors(ids)
+    if vectors.shape[0] < MIN_PROFILE_ITEMS:
+        return None
+    centroid = vectors.mean(axis=0)
+    norm = float(np.linalg.norm(centroid))
+    others = index.matrix[~np.isin(index.ids, exclude)]
+    if norm == 0 or not len(others):
+        return None
+    centroid = centroid / norm
+    return Taste(centroid, np.sort(others @ centroid), int(vectors.shape[0]))
+
+
+def taste_profile(session: Session) -> tuple[VectorIndex | None, Taste | None, Taste | None]:
+    """Liked and saved items (including Reddit upvotes/saves imported from a connected account)
+    pull `semantic_preference` up; items marked "less like this" push similar ones down."""
     model = session.scalar(select(Embedding.model).group_by(Embedding.model)
                            .order_by(func.count(Embedding.item_id).desc()).limit(1))
     if not model:
-        return None, None, None, 0
-    liked = session.scalars(
+        return None, None, None
+    liked = list(session.scalars(
         select(Item.id).outerjoin(SavedItem, SavedItem.item_id == Item.id)
         .where(or_(Item.user_vote == 1, SavedItem.id.is_not(None)))
-        .order_by(Item.last_opened_at.desc(), Item.id.desc()).limit(500)
-    ).all()
-    if len(liked) < MIN_PROFILE_ITEMS:
-        return None, None, None, 0
+        .order_by(Item.last_opened_at.desc(), Item.id.desc()).limit(500)))
+    disliked = list(session.scalars(select(Item.id).where(Item.user_vote == -1)
+                                    .order_by(Item.id.desc()).limit(500)))
+    if len(liked) < MIN_PROFILE_ITEMS and len(disliked) < MIN_PROFILE_ITEMS:
+        return None, None, None
     index = get_index(session, model)
-    _, vectors = index.vectors(list(liked))
-    if vectors.shape[0] < MIN_PROFILE_ITEMS:
-        return None, None, None, 0
-    centroid = vectors.mean(axis=0)
-    norm = float(np.linalg.norm(centroid))
-    if norm == 0:
-        return None, None, None, 0
-    centroid = centroid / norm
-    # Percentiles are taken among everything *except* the examples themselves.
-    others = index.matrix[~np.isin(index.ids, np.asarray(liked, dtype=np.int64))]
-    if not len(others):
-        return None, None, None, 0
-    return index, centroid, np.sort(others @ centroid), int(vectors.shape[0])
+    examples = np.asarray(liked + disliked, dtype=np.int64)
+    return index, _taste(index, liked, examples), _taste(index, disliked, examples)
 
 
 def rank_context(session: Session) -> RankContext:
-    index, centroid, reference, size = taste_profile(session)
-    return RankContext(community_scales(session), index, centroid, reference, size)
+    index, liked, disliked = taste_profile(session)
+    subs = {ident.lower(): sid for sid, ident in session.execute(
+        select(Source.id, Source.identifier).where(Source.kind == "reddit")) if not ident.startswith("http")}
+    return RankContext(community_scales(session), index, liked, disliked, subs)
 
 
 def _semantic(ctx: RankContext, item: Item) -> float:
-    if ctx.index is None or ctx.centroid is None or ctx.reference is None or not len(ctx.reference):
+    if ctx.index is None or (ctx.liked is None and ctx.disliked is None):
         return 0.5
     vector = ctx.index.vector(item.id)
-    if vector is None or vector.shape[-1] != ctx.centroid.shape[-1]:
+    taste = ctx.liked or ctx.disliked
+    if vector is None or vector.shape[-1] != taste.centroid.shape[-1]:
         return 0.5
-    similarity = float(vector @ ctx.centroid)
-    return float(np.searchsorted(ctx.reference, similarity, side="right")) / len(ctx.reference)
+    value = ctx.liked.percentile(vector) if ctx.liked else 0.5
+    if ctx.disliked:
+        value -= NEGATIVE_PULL * (ctx.disliked.percentile(vector) - 0.5)
+    return max(0.0, min(1.0, value))
+
+
+def _affinity(session: Session, ctx: RankContext, item: Item, community: CommunityPost | None) -> float:
+    """Learned source affinity (0.2..1.8, neutral 1.0) mapped to 0..1 with neutral 0.5. Reddit posts
+    use their subreddit's preference, whichever feed (front page, subreddit) delivered them."""
+    source_id = item.source_id
+    if community and community.platform == "reddit" and community.community and ctx.subreddit_sources:
+        source_id = ctx.subreddit_sources.get(community.community.lower(), source_id)
+    pref = session.get(SourcePreference, source_id) if source_id else None
+    return 0.5 if pref is None else max(0.0, min(1.0, (float(pref.affinity) - 0.2) / 1.6))
 
 
 def _engagement(community: CommunityPost, item: Item,
@@ -168,13 +207,12 @@ def score_item(session: Session, item: Item, ctx: RankContext | None = None) -> 
         ctx = rank_context(session)
     community = session.get(CommunityPost, item.id)
     repo = session.get(Repository, item.repository_id) if item.repository_id else None
-    pref = session.get(SourcePreference, item.source_id) if item.source_id else None
     cluster = session.get(StoryCluster, item.cluster_id) if item.cluster_id else None
 
     freshness = _freshness(item, half_lives)
     interest, interest_notes = _interest(session, item.id)
     source_quality = float(item.source.quality if item.source else 0.5)
-    source_affinity = min(1.0, max(0.0, float(pref.affinity if pref else 0.5)))
+    source_affinity = _affinity(session, ctx, item, community)
     engagement = 0.0
     momentum = 0.0
     evidence: dict[str, object] = {}
@@ -195,7 +233,9 @@ def score_item(session: Session, item: Item, ctx: RankContext | None = None) -> 
                                   "mentions_7d": repo.mentions_7d}
     semantic = _semantic(ctx, item)
     if ctx.profile_size:
-        evidence["taste_profile"] = {"examples": ctx.profile_size, "percentile": round(semantic, 3)}
+        evidence["taste_profile"] = {"liked": ctx.liked.size if ctx.liked else 0,
+                                     "disliked": ctx.disliked.size if ctx.disliked else 0,
+                                     "value": round(semantic, 3)}
     coverage = _sat((cluster.source_count if cluster else 1) - 1, 2)
     novelty = max(0.05, 1.0 - coverage * 0.35)
     spam = 0.0

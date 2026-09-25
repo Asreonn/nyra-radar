@@ -22,12 +22,19 @@ SEEDS: dict[str, tuple[str, ...]] = {
 }
 
 
+NAMES = {"local-ai": "Local AI", "coding-agents": "Coding agents", "open-source": "Open source", "linux": "Linux",
+         "machine-learning": "Machine learning", "developer-tools": "Developer tools", "security": "Security",
+         "web-development": "Web development", "hardware": "Hardware"}
+
+
 def seed_topics(session: Session) -> int:
     count = 0
     for slug, aliases in SEEDS.items():
         topic = session.scalar(select(Topic).where(Topic.slug == slug))
+        if topic is not None and topic.name == slug.replace("-", " ").title():
+            topic.name = NAMES[slug]  # earlier installs used title-cased slugs ("Local Ai")
         if topic is None:
-            topic = Topic(slug=slug, name=slug.replace("-", " ").title(), aliases=list(aliases), kind="seed")
+            topic = Topic(slug=slug, name=NAMES[slug], aliases=list(aliases), kind="seed")
             session.add(topic)
             session.flush()
             session.add(Interest(topic_id=topic.id, seed_weight=0.15 if slug in
