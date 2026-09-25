@@ -201,7 +201,7 @@ def test_account_connect_signals_and_taste_profile(db):
     seed_topics(db)
     front = "https://www.reddit.com/.rss?feed=SECRETTOKEN&user=alice"
     sources = reddit_account.connect(db, front)
-    assert [s.config["account"] for s in sources] == ["front", "upvoted", "saved"]
+    assert [s.config["account"] for s in sources] == ["front", "upvoted", "saved", "downvoted", "hidden"]
     assert "SECRETTOKEN" in sources[1].identifier and "/user/alice/upvoted/" in sources[1].identifier
     assert redact_feed_tokens(sources[1].identifier).count("SECRETTOKEN") == 0
     subscriptions = Source(kind="reddit", name="Reddit · LocalLLaMA", identifier="LocalLLaMA", config={})
@@ -215,6 +215,12 @@ def test_account_connect_signals_and_taste_profile(db):
     saved = ingest_items(db, sources[2], [_reddit_raw("s1", "Saved homelab rack build", "homelab", 10)])
     reddit_account.apply_account_signals(db, sources[2], saved.touched_item_ids)
     assert db.query(SavedItem).count() == 1
+    down = ingest_items(db, sources[3], [_reddit_raw("d1", "Crypto pump signals group", "CryptoMoonShots", 5)])
+    assert reddit_account.apply_account_signals(db, sources[3], down.touched_item_ids) == 1
+    assert db.get(Item, down.touched_item_ids[0]).user_vote == -1
+    hid = ingest_items(db, sources[4], [_reddit_raw("h1", "Celebrity gossip thread", "popculture", 5)])
+    assert reddit_account.apply_account_signals(db, sources[4], hid.touched_item_ids) == 1
+    assert db.get(Item, hid.touched_item_ids[0]).is_hidden
     fresh = ingest_items(db, subscriptions, [
         _reddit_raw("n1", "New quantized local model benchmark", "LocalLLaMA", 40, text=liked_text * 6),
         _reddit_raw("n2", "Gardening tips for tomatoes", "LocalLLaMA", 40, text="soil water tomato garden " * 12),
@@ -226,8 +232,8 @@ def test_account_connect_signals_and_taste_profile(db):
     shown = {e.item.id for e in build_feed(db, limit=20)}
     assert shown.isdisjoint(stats.touched_item_ids)  # already upvoted on Reddit: not shown again
     status = reddit_account.status(db)
-    assert status["connected"] and status["user"] == "alice" and status["learned"] == {"upvoted": 4, "saved": 1}
-    assert reddit_account.disconnect(db) == 3
+    assert status["connected"] and status["user"] == "alice" and status["learned"] == {"upvoted": 4, "saved": 1, "downvoted": 1, "hidden": 1}
+    assert reddit_account.disconnect(db) == 5
 
 
 def test_html_to_text_keeps_structure():

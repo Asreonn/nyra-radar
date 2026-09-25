@@ -7,11 +7,13 @@ ordinary `reddit` sources from it:
 
 - front page  -> collects exactly the subreddits the user subscribes to;
 - upvoted     -> every post is recorded as a `like`;
-- saved       -> every post is saved in Radar and recorded as a `save`.
+- saved       -> every post is saved in Radar and recorded as a `save`;
+- downvoted   -> every post is recorded as a `dislike` (topic: "less of this kind of thing");
+- hidden      -> every post is recorded as `hide`.
 
-Likes and saves feed the topic interest model, per-source affinity and the embedding taste
+Likes, saves and dislikes feed the topic interest model, per-source affinity and the embedding taste
 profile (`semantic_preference`). Posts that only reached Radar because the user already
-upvoted/saved them are marked `meta.reddit_account` and kept out of the feeds. The token only
+upvoted/saved/downvoted/hidden them are marked `meta.reddit_account` and kept out of the feeds. The token only
 lives in the source identifiers and is masked in every API response; disconnecting deletes it.
 """
 from __future__ import annotations
@@ -31,6 +33,8 @@ ACCOUNT_FEEDS: dict[str, tuple[str, str, str | None, int]] = {
     "front": ("Reddit · Front page", "/.rss", None, 20),
     "upvoted": ("Reddit · Your upvotes", "/user/{user}/upvoted/.rss", "like", 60),
     "saved": ("Reddit · Your saved", "/user/{user}/saved/.rss", "save", 60),
+    "downvoted": ("Reddit · Your downvotes", "/user/{user}/downvoted/.rss", "dislike", 180),
+    "hidden": ("Reddit · Your hidden", "/user/{user}/hidden/.rss", "hide", 180),
 }
 
 
@@ -94,10 +98,10 @@ def disconnect(session: Session) -> int:
 
 
 def apply_account_signals(session: Session, source: Source, item_ids: list[int]) -> int:
-    """Turn posts from the upvoted/saved listings into like/save feedback (idempotent)."""
+    """Turn posts from the account listings into like/save/dislike/hide feedback (idempotent)."""
     config = source.config or {}
     signal, role = config.get("account_signal"), config.get("account")
-    if signal not in ("like", "save") or not item_ids:
+    if signal not in ("like", "save", "dislike", "hide") or not item_ids:
         return 0
     items = session.scalars(select(Item).where(Item.id.in_(item_ids))).all()
     classify_items(session, items)  # topics must exist before the event snapshots them
@@ -117,6 +121,12 @@ def apply_account_signals(session: Session, source: Source, item_ids: list[int])
             session.add(SavedItem(item_id=item.id, note="Saved on Reddit"))
             record(session, item, "save", {"via": "reddit_account", "listing": role})
             applied += 1
+        elif signal == "dislike" and item.user_vote != -1:
+            record(session, item, "dislike", {"via": "reddit_account", "listing": role, "reason": "topic"})
+            applied += 1
+        elif signal == "hide" and not item.is_hidden:
+            record(session, item, "hide", {"via": "reddit_account", "listing": role})
+            applied += 1
     if applied:
         fold_events(session)
     return applied
@@ -135,5 +145,5 @@ def status(session: Session) -> dict:
                       "access": (source.state or {}).get("last_access")})
     marker = func.json_extract(Item.meta, "$.reddit_account")
     counts = {role: session.scalar(select(func.count(Item.id)).where(marker.like(f'%"{role}"%'))) or 0
-              for role in ("upvoted", "saved")}
+              for role in ("upvoted", "saved", "downvoted", "hidden")}
     return {"connected": True, "user": rows[0].config.get("account_user"), "feeds": feeds, "learned": counts}
