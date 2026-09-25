@@ -163,6 +163,10 @@ def test_community_feed_sorts_and_filters(db):
     top = community_feed(db, community="rust", sort="top")
     assert [i.source_item_id for i in top] == ["t3_r1", "t3_r2"]
     assert len(community_feed(db, community="rust,golang", sort="new")) == 3
+    source.status = "muted"; db.flush()  # a muted source's collected posts leave the feeds too
+    assert community_feed(db, community="rust,golang", sort="new") == []
+    assert not [e for e in build_feed(db, limit=20) if e.item.source_id == source.id]
+    source.status = "active"; db.flush()
     assert normalize_subreddit("https://www.reddit.com/r/linux/top/") == "linux"
     assert normalize_subreddit("r/rust+golang") == "rust+golang"
     assert normalize_subreddit("not a sub!") is None

@@ -52,6 +52,14 @@ def _age_hours(item: Item) -> float:
     return max(0.0, (utcnow() - (item.published_at or item.first_seen_at)).total_seconds() / 3600)
 
 
+
+SILENCED_STATUSES = ("muted", "disabled", "rejected")
+
+
+def silenced_source_ids(session: Session) -> set[int]:
+    """Sources the user turned off: their already-collected posts leave the feeds too."""
+    return set(session.scalars(select(Source.id).where(Source.status.in_(SILENCED_STATUSES))))
+
 def _sort_key(sort: str, item: Item, post: CommunityPost, score: ItemScore | None):
     signal = score.community if score else 0.3
     if sort == "new":
@@ -78,7 +86,9 @@ def community_feed(session: Session, *, platform: str = "reddit", community: str
         names = [c.strip().lower() for c in community.split(",") if c.strip()]
         stmt = stmt.where(func.lower(CommunityPost.community).in_(names))
     rows = session.execute(stmt.order_by(Item.first_seen_at.desc()).limit(3000)).all()
-    rows = [r for r in rows if not (r[0].meta or {}).get("reddit_account")]  # already upvoted/saved there
+    silenced = silenced_source_ids(session)
+    rows = [r for r in rows if not (r[0].meta or {}).get("reddit_account")  # already upvoted/saved there
+            and r[0].source_id not in silenced]
     rows.sort(key=lambda r: _sort_key(sort, *r), reverse=True)
     return [r[0] for r in rows[offset:offset + limit]]
 
