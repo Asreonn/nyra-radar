@@ -241,7 +241,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # Prior per content type (0..1) for the `content_type_preference` component. Reddit is the
     # primary community source; Hacker News stays a strong secondary one.
     "ranking.content_type_preference": {"reddit_post": 0.8, "hackernews_post": 0.65, "github_repository": 0.6,
-                                        "github_release": 0.55, "default": 0.5},
+                                        "youtube_video": 0.6, "github_release": 0.55, "default": 0.5},
     # Feed budget for the Today/mixed digest. Normalised if it does not sum to 1. `reddit` is a
     # dedicated Reddit section shown first on Today.
     "feed.budget": {"reddit": 0.30, "for_you": 0.35, "important": 0.12, "adjacent": 0.10, "oss": 0.08,

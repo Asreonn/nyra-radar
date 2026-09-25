@@ -48,6 +48,10 @@ _SELF_BLOCK = re.compile(r"<!--\s*SC_OFF\s*-->(.*?)<!--\s*SC_ON\s*-->", re.DOTAL
 _LINK_ANCHOR = re.compile(r"<a href=\"([^\"]+)\">\s*\[link\]\s*</a>")
 _POST_PATH = re.compile(r"/r/([^/]+)/comments/([a-z0-9]+)", re.IGNORECASE)
 _HREF = re.compile(r"href=\"(https?://[^\"]+)\"")
+_ANCHOR = re.compile(r"<a\s[^>]*href=\"(https?://[^\"]+)\"[^>]*>.*?</a>", re.DOTALL)
+_MD_IMAGE_URL = re.compile(r"https://(?:preview\.redd\.it|i\.redd\.it|i\.imgur\.com)/[^\s)\]]+")
+INLINE_IMAGE_HOSTS = ("preview.redd.it", "i.redd.it", "i.imgur.com")
+MAX_INLINE_IMAGES = 12
 # Atom has no `stickied` flag; pinned community threads are recognisable by title.
 _PINNED_TITLE = re.compile(r"\b(mega ?thread|(daily|weekly|bi-weekly|monthly) (discussion|thread))\b",
                            re.IGNORECASE)
@@ -122,6 +126,32 @@ def full_size_image(url: str | None) -> str | None:
     return f"https://i.redd.it{parts.path}"
 
 
+def inline_image(url: str) -> str | None:
+    """Full-size URL for a Reddit-hosted (or imgur) image linked inside a post, else None."""
+    url = html.unescape(url)
+    host = urlsplit(url).hostname or ""
+    if host not in INLINE_IMAGE_HOSTS:
+        return None
+    return full_size_image(url) or (url if re.search(r"\.(png|jpe?g|gif|webp)$", urlsplit(url).path) else None)
+
+
+def selftext_with_images(fragment: str) -> tuple[str, list[str]]:
+    """Reddit post HTML -> readable text in which every inline image link becomes a line holding
+    the image's full-size URL (the reader renders those lines as pictures, in place)."""
+    images: list[str] = []
+
+    def swap(match: re.Match) -> str:
+        full = inline_image(match.group(1))
+        if not full:
+            return match.group(0)
+        if full not in images:
+            images.append(full)
+        return f"<p>{full}</p>"
+
+    text = html_to_text(_ANCHOR.sub(swap, fragment))
+    return text, images[:MAX_INLINE_IMAGES]
+
+
 def media_type(target: str | None, post: dict[str, Any] | None = None) -> str | None:
     """image | gallery | video for Reddit-hosted media posts, else None."""
     post = post or {}
@@ -186,6 +216,14 @@ def post_to_raw(post: dict[str, Any]) -> RawItem | None:
     for media in list((post.get("media_metadata") or {}).values())[:1]:  # first gallery image
         source = (media.get("s") or {}).get("u") or (media.get("s") or {}).get("gif")
         item.add_image("reddit_preview", html.unescape(source) if source else None)
+    inline = []
+    for url in _MD_IMAGE_URL.findall(selftext):
+        full = inline_image(url)
+        if full and full not in inline:
+            inline.append(full)
+    if inline:
+        item.meta["inline_images"] = inline[:MAX_INLINE_IMAGES]
+        item.add_image("reddit_preview", inline[0])
     if link_url:
         item.links.append(link_url)
     item.links += extract_urls(selftext, 30)
@@ -203,7 +241,7 @@ def rss_entry_to_raw(entry: Any) -> RawItem | None:
     post_id = (entry.get("id") or "").removeprefix("t3_") or match.group(2)
     body = entry_html(entry)
     self_block = _SELF_BLOCK.search(body)
-    selftext = html_to_text(self_block.group(1)) if self_block else ""
+    selftext, inline = selftext_with_images(self_block.group(1)) if self_block else ("", [])
     anchor = _LINK_ANCHOR.search(body)
     target = html.unescape(anchor.group(1)) if anchor else ""
     points_home = not target or _POST_PATH.search(target) is not None
@@ -225,7 +263,7 @@ def rss_entry_to_raw(entry: Any) -> RawItem | None:
                                 score=None, num_comments=None, is_self=is_self,
                                 post_kind="self" if is_self else ("media" if is_media else "link")),
         meta={"subreddit": sub, "via": "rss", "media_url": target if is_media else None,
-              "media_type": media_type(target) if is_media else None},
+              "media_type": media_type(target) if is_media else None, "inline_images": inline},
     )
     if is_media and target.startswith(("https://i.redd.it", "https://i.imgur.com")):
         item.add_image("reddit_preview", target)
@@ -233,10 +271,12 @@ def rss_entry_to_raw(entry: Any) -> RawItem | None:
         url = html.unescape(thumb.get("url") or "")
         item.add_image("reddit_preview", full_size_image(url))
         item.add_image("reddit_thumb", url)
+    for url in inline[:1]:  # a text post with pictures leads with its first one
+        item.add_image("reddit_preview", url)
     if link_url:
         item.links.append(link_url)
     if self_block:
-        item.links += _HREF.findall(self_block.group(1))[:30]
+        item.links += [html.unescape(u) for u in _HREF.findall(self_block.group(1))[:30]]
     return item
 
 

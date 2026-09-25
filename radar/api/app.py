@@ -1,15 +1,20 @@
 """FastAPI application: browser API and stable Nyra tool surface."""
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import secrets
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from radar import paths
@@ -17,9 +22,12 @@ from radar.api.serializers import cluster_dict, item_dict
 from radar.clustering.embeddings import make_embedder
 from radar.clustering.service import related_items
 from radar.collectors import COLLECTORS
+from radar.collectors.reddit import full_size_image
+from radar.collectors.youtube import resolve_channel_id
 from radar.config import get_config
 from radar.db import get_engine, migrate, session_factory
 from radar.db.models import (
+    CommunityPost,
     DigestItem,
     DigestSession,
     DiscoveryCandidate,
@@ -32,19 +40,26 @@ from radar.db.models import (
 )
 from radar.discovery.service import decide_trial, start_trial
 from radar.enrichment.comments import get_thread
-from radar.net import Http
+from radar.enrichment.pipeline import cache_item_image, extract_item, image_cache
+from radar.extraction.canonical_url import github_repo_from_url, url_hash
+from radar.extraction.images import ImageRejected
+from radar.net import Http, HttpError
 from radar.ranking import build_feed, rescore, score_item
 from radar.services import reddit_account
+from radar.services.brief import BriefUnavailable, cached_brief, make_brief
+from radar.services.catalog import catalog
 from radar.services.collect import fetch_source
 from radar.services.community import (
     SORTS,
     community_feed,
+    keep_reading,
     list_subreddits,
     mask_feed_url,
     normalize_subreddit,
 )
 from radar.services.feedback import explain_interests, fold_events, record, undo_last
-from radar.services.search import hybrid
+from radar.services.live_search import live_search
+from radar.services.search import hybrid, index_items
 from radar.services.settings import all_values, set_value
 from radar.services.taste import profile, tune_candidates, why
 from radar.util import iso, redact_feed_tokens, utcnow
@@ -87,11 +102,25 @@ def api_http() -> Http:
     return _http
 
 
+def _warm_vector_index() -> None:
+    from radar.clustering.vector_index import get_index
+    from radar.db.models import Embedding
+
+    try:
+        with session_factory()() as session:
+            model = session.scalar(select(Embedding.model).limit(1))
+            if model:
+                get_index(session, model)
+    except Exception as exc:  # noqa: BLE001 - warming is an optimisation; search builds the index itself
+        logging.getLogger(__name__).debug("vector index warm-up skipped: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _http
     paths.ensure_dirs()
     migrate(get_engine())
+    asyncio.get_running_loop().run_in_executor(None, _warm_vector_index)  # first search is instant
     yield
     if _http is not None:
         await _http.close()
@@ -100,6 +129,15 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Nyra Radar", version="1.0.0", lifespan=lifespan,
               description="Local-first personal technology intelligence API")
+
+
+@app.exception_handler(OperationalError)
+async def database_busy(_request: Request, exc: OperationalError):
+    """SQLite write contention (worker vs. UI) is transient: tell the client to retry."""
+    if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": "database busy, retry"}, status_code=503, headers={"Retry-After": "1"})
+    raise exc
 
 
 @app.middleware("http")
@@ -127,6 +165,7 @@ def health(db: DB) -> dict:
 @app.get("/api/v1/items")
 def browse_items(db: DB, q: str | None = None, content_type: str | None = None,
                  source_id: int | None = None, saved: bool = False, history: bool = False,
+                 period: str | None = None,
                  sort: str = Query("newest", pattern="^(newest|score|novelty)$"), limit: int = Query(50, le=200),
                  offset: int = Query(0, ge=0)) -> dict:
     stmt = select(Item).where(Item.is_hidden.is_(False))
@@ -138,6 +177,9 @@ def browse_items(db: DB, q: str | None = None, content_type: str | None = None,
         stmt = stmt.join(SavedItem, SavedItem.item_id == Item.id)
     if history:
         stmt = stmt.where(Item.is_read.is_(True))
+    if period:
+        cutoff = utcnow() - timedelta(hours=_period_hours(period))
+        stmt = stmt.where(func.coalesce(Item.published_at, Item.first_seen_at) >= cutoff)
     if q:
         ids = [r["item_id"] for r in hybrid(db, q, None, None, limit=1000)]
         if not ids:
@@ -159,6 +201,36 @@ def get_item(item_id: int, db: DB) -> dict:
     if item is None:
         raise HTTPException(404, "item not found")
     return {"item": {**item_dict(db, item, detail=True), "why": why(db, item)}}
+
+
+@app.post("/api/v1/items/{item_id}/hydrate")
+async def hydrate(item_id: int, db: DB) -> dict:
+    """Make an opened item complete: the thread's full copy of a Reddit post (text, inline images),
+    the linked article when it has not been extracted yet, its picture, and the comments."""
+    item = db.get(Item, item_id)
+    if item is None:
+        raise HTTPException(404, "item not found")
+    http, cfg = api_http(), get_config()
+    extract_tries = int((item.stage_attempts or {}).get("on_demand_extractions", 0))
+    wants_article = bool(item.link_url) or item.content_type in ("article", "rss_entry")
+    # Every stage commits before the next network wait, so no write lock is held across I/O.
+    if wants_article and item.extraction_state in ("pending", "failed") and extract_tries < 2:
+        item.stage_attempts = dict(item.stage_attempts or {}) | {"on_demand_extractions": extract_tries + 1}
+        db.commit()
+        if item.link_url and github_repo_from_url(item.link_url):
+            item.extraction_state = "skipped"
+        else:
+            await extract_item(db, http, item)
+        db.commit()
+    thread = None
+    if db.get(CommunityPost, item.id) is not None:
+        thread = await get_thread(db, http, cfg, item)
+        db.commit()
+    if item.image_state == "pending":
+        await cache_item_image(db, image_cache(db, http), item)
+    index_items(db, [item.id])
+    db.commit()
+    return {"item": {**item_dict(db, item, detail=True), "why": why(db, item)}, "thread": thread}
 
 
 @app.get("/api/v1/items/{item_id}/comments")
@@ -247,6 +319,52 @@ async def search(q: str = Query(min_length=2), db: DB = None, limit: int = Query
     items = {i.id: i for i in db.scalars(select(Item).where(Item.id.in_([r["item_id"] for r in ranked])))}
     return {"query": q, "results": [{**item_dict(db, items[r["item_id"]]), "search": r}
                                       for r in ranked if r["item_id"] in items], "count": len(ranked)}
+
+
+@app.get("/api/v1/search/live")
+async def search_live(db: DB, q: str = Query(min_length=2), where: str = Query("reddit", pattern="^(reddit|hackernews)$"),
+                      limit: int = Query(25, le=50), period: str = Query("year", pattern="^(day|week|month|year|all)$")) -> dict:
+    """Search Reddit or Hacker News beyond what Radar has collected; results open in the reader."""
+    try:
+        items = await live_search(db, api_http(), q, where, limit, period)
+    except (HttpError, ValueError) as exc:
+        if getattr(exc, "status_code", None) == 429 or not str(exc).strip():
+            raise HTTPException(502, f"{'Reddit' if where == 'reddit' else 'Hacker News'} is rate-limiting "
+                                     "searches right now — try again in a minute") from exc
+        raise HTTPException(502, f"{where} search failed: {redact_feed_tokens(str(exc))}") from exc
+    db.commit()
+    return {"query": q, "where": where, "items": [item_dict(db, x) for x in items]}
+
+
+@app.get("/api/v1/feed")
+def keep_reading_feed(db: DB, offset: int = Query(0, ge=0), limit: int = Query(20, le=60),
+                      exclude: str = "") -> dict:
+    """Ranked, endless "keep reading" list (Today's tail)."""
+    skip = {int(x) for x in exclude.split(",") if x.strip().isdigit()}
+    items = keep_reading(db, offset=offset, limit=limit, exclude=skip)
+    return {"items": [item_dict(db, x) for x in items], "offset": offset, "limit": limit}
+
+
+@app.get("/api/v1/items/{item_id}/brief")
+def get_brief(item_id: int, db: DB) -> dict:
+    item = db.get(Item, item_id)
+    if item is None:
+        raise HTTPException(404, "item not found")
+    return {"item_id": item_id, "brief": cached_brief(db, item)}
+
+
+@app.post("/api/v1/items/{item_id}/brief")
+async def post_brief(item_id: int, db: DB, refresh: bool = False) -> dict:
+    """TL;DR of the post/article and of its discussion, from the local model (cached)."""
+    item = db.get(Item, item_id)
+    if item is None:
+        raise HTTPException(404, "item not found")
+    try:
+        brief = await make_brief(db, get_config(), item, refresh=refresh)
+    except BriefUnavailable as exc:
+        db.commit()
+        raise HTTPException(503, str(exc)) from exc
+    return {"item_id": item_id, "brief": brief}
 
 
 @app.get("/api/v1/digest")
@@ -376,11 +494,25 @@ def sources(db: DB) -> dict:
                          "last_error": redact_feed_tokens(s.last_error)} for s in rows]}
 
 
+@app.get("/api/v1/catalog")
+def source_catalog(db: DB) -> dict:
+    """Curated subreddits, YouTube channels and feeds by topic, with follow state."""
+    return {"groups": catalog(db)}
+
+
 @app.post("/api/v1/sources")
-def add_source(db: DB, payload: dict[str, Any] = BODY_REQUIRED) -> dict:
+async def add_source(db: DB, payload: dict[str, Any] = BODY_REQUIRED) -> dict:
     kind = str(payload.get("kind", ""))
     identifier = str(payload.get("identifier", "")).strip()
     name, url = payload.get("name"), payload.get("url")
+    if kind == "youtube" and not re.fullmatch(r"UC[A-Za-z0-9_-]{22}|PL[A-Za-z0-9_-]+", identifier):
+        # @handle, channel URL or /c/name -> UC… id (the public feed needs the id)
+        resolved = await resolve_channel_id(api_http(), identifier)
+        if not resolved:
+            raise HTTPException(422, "could not find that YouTube channel (try its @handle or channel URL)")
+        url = url or (identifier if identifier.startswith("http") else f"https://www.youtube.com/{identifier.lstrip('/')}")
+        name = name or f"YouTube · {identifier.rstrip('/').rsplit('/', 1)[-1].lstrip('@')}"
+        identifier = resolved
     if kind == "reddit":
         identifier = normalize_subreddit(identifier) or ""
         if not identifier:
@@ -454,6 +586,39 @@ def update_setting(key: str, db: DB, payload: dict[str, Any] = BODY_REQUIRED) ->
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
     return {"key": key, "value": value}
+
+
+REMOTE_IMAGE_HOSTS = ("i.redd.it", "preview.redd.it", "external-preview.redd.it", "i.imgur.com", "i.ytimg.com")
+
+
+@app.get("/media/remote")
+async def remote_media(u: str, db: DB):
+    """Images referenced inside posts and comments, fetched once and served from the local cache
+    (no hotlinking from the browser). Only well-known image hosts are allowed."""
+    url = full_size_image(u) or u
+    parts = urlsplit(url)
+    if parts.scheme != "https" or (parts.hostname or "") not in REMOTE_IMAGE_HOSTS:
+        raise HTTPException(404, "host not allowed")
+    row = db.scalar(select(Image).where(Image.url_hash == url_hash(url)))
+    if row is None or row.status != "ok" or not (paths.image_cache_dir() / (row.cache_path or "")).is_file():
+        if row is not None and row.status in ("failed", "rejected") and row.fail_count >= 2:
+            raise HTTPException(404, "image unavailable")
+        row = row or Image(original_url=url, url_hash=url_hash(url), kind="inline")
+        db.add(row)
+        try:
+            image, _ = await image_cache(db, api_http()).download(url, "inline")
+        except ImageRejected as exc:
+            row.fail_count = (row.fail_count or 0) + 1
+            row.status = "rejected"
+            db.commit()
+            raise HTTPException(404, "image unavailable") from exc
+        if image is None:
+            raise HTTPException(404, "image unavailable")
+        row.content_hash, row.mime, row.width, row.height = image.content_hash, image.mime, image.width, image.height
+        row.bytes, row.cache_path, row.status, row.fetched_at = image.bytes, image.rel_path, "ok", utcnow()
+        db.commit()
+    return FileResponse(paths.image_cache_dir() / row.cache_path, media_type="image/webp",
+                        headers={"Cache-Control": "public, max-age=604800"})
 
 
 @app.get("/media/{image_id}")

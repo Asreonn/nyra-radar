@@ -26,6 +26,7 @@
       <symbol id="i-back" viewBox="0 0 24 24"><path d="M19 12H5.5m5.5-6-6 6 6 6"/></symbol>
       <symbol id="i-today" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4m6-4v4"/></symbol>
       <symbol id="i-reddit" viewBox="0 0 24 24"><path d="M5 5.5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8l-4.5 3.5v-3.5H5a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z"/><path d="M12 13.5v-5m-2.3 2.3L12 8.5l2.3 2.3"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="3"/><path d="m10.5 9.5 4 2.5-4 2.5z"/></symbol>
       <symbol id="i-hn" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8.5 8 3.5 5 3.5-5M12 13v4"/></symbol>
     </defs>
   </svg>
@@ -37,6 +38,7 @@
         <a href="#/today" data-route="today" data-fresh="1">Today</a>
         <a href="#/reddit" data-route="reddit" data-fresh="1">Reddit</a>
         <a href="#/hn" data-route="hn" data-fresh="1">Hacker News</a>
+        <a href="#/videos" data-route="videos" data-fresh="1">Videos</a>
         <a href="#/saved" data-route="saved" data-fresh="1">Saved</a>
       </nav>
       <div class="top-actions">
@@ -46,6 +48,7 @@
         <details class="menu">
           <summary class="icon-btn" aria-label="More pages"><svg class="ico"><use href="#i-more"/></svg></summary>
           <div class="menu-pop" role="menu">
+            <a href="#/discover" data-fresh="1">Discover sources</a>
             <a href="#/tune" data-fresh="1">Tune your feed</a>
             <a href="#/explore" data-fresh="1">Everything collected</a>
             <a href="#/projects" data-fresh="1">Open-source projects</a>
@@ -63,6 +66,7 @@
     <a href="#/today" data-route="today" data-fresh="1"><svg class="ico"><use href="#i-today"/></svg>Today</a>
     <a href="#/reddit" data-route="reddit" data-fresh="1"><svg class="ico"><use href="#i-reddit"/></svg>Reddit</a>
     <a href="#/hn" data-route="hn" data-fresh="1"><svg class="ico"><use href="#i-hn"/></svg>HN</a>
+    <a href="#/videos" data-route="videos" data-fresh="1"><svg class="ico"><use href="#i-play"/></svg>Videos</a>
     <a href="#/saved" data-route="saved" data-fresh="1"><svg class="ico"><use href="#i-save"/></svg>Saved</a>
   </nav>
   <div id="toast" role="status" aria-live="polite"></div>

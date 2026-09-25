@@ -56,6 +56,8 @@ class YouTubeCollector(Collector):
             link = entry.get("link") or (f"https://www.youtube.com/watch?v={vid}" if vid else None)
             if not link:
                 continue
+            if "/shorts/" in link and source.config.get("skip_shorts", True):
+                continue  # Shorts carry little information for a news reader
             desc = ""
             if entry.get("media_group") or entry.get("summary"):
                 desc = entry.get("summary", "")
@@ -71,9 +73,11 @@ class YouTubeCollector(Collector):
                 author=entry.get("author") or channel,
                 published_at=entry_published(entry),
                 external_score=int(stats.get("views", 0) or 0) or None,
-                meta={"channel": channel, "video_id": vid, "views": stats.get("views"),
-                      "likes": rating.get("count")},
+                meta={"channel": channel, "video_id": vid, "views": int(stats.get("views") or 0) or None,
+                      "likes": int(rating.get("count") or 0) or None},
             )
+            if vid:  # 16:9 1280x720 when the uploader provided it; hqdefault (4:3, letterboxed) otherwise
+                item.add_image("youtube_thumb", f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg")
             for thumb in entry.get("media_thumbnail", []) or []:
                 item.add_image("youtube_thumb", thumb.get("url"))
             if vid:

@@ -42,6 +42,21 @@ DEFAULT_SOURCES = (
     ("rss", "TechCrunch", "https://techcrunch.com/feed/", "https://techcrunch.com", {}),
     ("rss", "The Register", "https://www.theregister.com/headlines.atom", "https://theregister.com", {}),
     ("google_news", "Google News · local AI", '"local AI" OR "local LLM"', "https://news.google.com", {}),
+    ("rss", "Lobsters", "https://lobste.rs/rss", "https://lobste.rs", {}),
+    ("rss", "Phoronix", "https://www.phoronix.com/rss.php", "https://www.phoronix.com", {}),
+    ("rss", "The Verge", "https://www.theverge.com/rss/index.xml", "https://www.theverge.com", {}),
+    ("rss", "Simon Willison", "https://simonwillison.net/atom/everything/", "https://simonwillison.net", {}),
+    # Tech news and explainers on YouTube (channel ids resolved and verified 2026-09-25; more in Discover).
+    ("youtube", "YouTube · Fireship", "UCsBjURrPoezykLs9EqgamOA", "https://www.youtube.com/@Fireship", {}),
+    ("youtube", "YouTube · TechLinked", "UCeeFfhMcJa1kjtfZAGskOCA", "https://www.youtube.com/@TechLinked", {}),
+    ("youtube", "YouTube · AI Explained", "UCNJ1Ymd5yFuUPtn21xtRbbw",
+     "https://www.youtube.com/@aiexplained-official", {}),
+    ("youtube", "YouTube · Matt Wolfe", "UChpleBmo18P08aKCIgti38g", "https://www.youtube.com/@mreflow", {}),
+    ("youtube", "YouTube · Two Minute Papers", "UCbfYPyITQ-7l4upoX8nvctg",
+     "https://www.youtube.com/@TwoMinutePapers", {}),
+    ("youtube", "YouTube · The PrimeTime", "UCUyeluBRhGPCW4rPe_UvBZQ", "https://www.youtube.com/@ThePrimeTimeagen", {}),
+    ("youtube", "YouTube · The Linux Experiment", "UC5UAwBUum7CPN5buc-_N1Fw", "https://www.youtube.com/@TheLinuxEXP", {}),
+    ("youtube", "YouTube · Level1Techs", "UC4w1YQAJMWOz4qtxinq55LQ", "https://www.youtube.com/@Level1Techs", {}),
 )
 
 

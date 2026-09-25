@@ -20,6 +20,9 @@ def index_items(session: Session, ids: list[int]) -> None:
         return
     for chunk_start in range(0, len(ids), 400):
         chunk = ids[chunk_start:chunk_start + 400]
+        # Write first: a transaction that starts by reading can hit SQLite's WAL snapshot conflict
+        # ("database is locked") when another connection commits before its first write.
+        session.execute(text(f"DELETE FROM item_fts WHERE rowid IN ({','.join(map(str, chunk))})"))
         items = session.scalars(select(Item).where(Item.id.in_(chunk))).all()
         topic_rows = session.execute(
             select(ItemTopic.item_id, Topic.name).join(Topic, Topic.id == ItemTopic.topic_id)
@@ -30,7 +33,6 @@ def index_items(session: Session, ids: list[int]) -> None:
         repo_ids = [it.repository_id for it in items if it.repository_id]
         repos = {r.id: r for r in session.scalars(select(Repository).where(Repository.id.in_(repo_ids)))} \
             if repo_ids else {}
-        session.execute(text(f"DELETE FROM item_fts WHERE rowid IN ({','.join(map(str, chunk))})"))
         rows = []
         for it in items:
             meta = it.meta or {}

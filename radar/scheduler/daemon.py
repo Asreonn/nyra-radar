@@ -65,7 +65,8 @@ class Daemon:
                 row.value = {"at": iso(utcnow()), "result": result}
                 return result
             result["collect"] = await collect_due(session, self.http, self.config, limit=4)
-            result["extract"] = await extract_pending(session, self.http, limit=12)
+            result["extract"] = await extract_pending(
+                session, self.http, limit=int(get_setting(session, "pipeline.extraction_batch", 30)))
             fresh = session.scalars(select(Item).where(Item.first_seen_at >= utcnow() - timedelta(days=7),
                                                        Item.processing_state == "normalized")
                                     .order_by(Item.first_seen_at.desc()).limit(300)).all()
@@ -77,6 +78,7 @@ class Daemon:
                 result["embed"] = await embed_pending(session, self.embedder, limit=48)
             result["cluster"] = cluster_pending(session, limit=180)
             result["rank"] = rescore(session)
+            session.commit()  # release the write lock before the network-bound stages below
             # Network-only (no model): keep the best Reddit/HN discussions ready to read.
             result["comments"] = await prefetch_threads(
                 session, self.http, self.config, limit=int(get_setting(session, "pipeline.comments_per_cycle", 6)))

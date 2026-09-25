@@ -16,6 +16,7 @@ import io
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from PIL import Image as PILImage
 from PIL import UnidentifiedImageError
@@ -69,6 +70,21 @@ def order_candidates(cands: list[tuple[str, str]]) -> list[tuple[str, str]]:
         seen.add(url)
         out.append((kind, url))
     return out
+
+
+def reopen_image_stage(item: Any, before: list[tuple[str, str]], after: list[tuple[str, str]]) -> None:
+    """New image candidates (og:image from the article, inline Reddit images) re-open the image
+    stage when nothing is cached yet or when a candidate outranks the cached one."""
+    known = {tuple(c) for c in before}
+    fresh = [tuple(c) for c in after if tuple(c) not in known]
+    if not fresh:
+        return
+    if item.image_state in ("none", "failed"):
+        item.image_state = "pending"
+    elif item.image_state == "done":
+        current = next((kind for kind, url in before if url == item.image_url), None)
+        if current is None or min(priority(kind) for kind, _ in fresh) < priority(current):
+            item.image_state = "pending"
 
 
 def _process(data: bytes, kind: str, max_width: int, root: Path) -> CachedImage:

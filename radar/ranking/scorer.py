@@ -24,6 +24,7 @@ from radar.db.models import (
     SourcePreference,
     StoryCluster,
 )
+from radar.services.community import feed_excluded
 from radar.services.settings import get as get_setting
 from radar.util import utcnow
 
@@ -348,8 +349,7 @@ def build_feed(session: Session, *, limit: int = 40, period_hours: int = 168,
 
     from radar.services.community import silenced_source_ids
     silenced = silenced_source_ids(session)
-    rows = [r for r in rows if not (r[0].meta or {}).get("reddit_account")  # already upvoted/saved there
-            and r[0].source_id not in silenced]
+    rows = [r for r in rows if not feed_excluded(r[0]) and r[0].source_id not in silenced]
     for index, (item, score) in enumerate(rows):
         if len(picked) >= limit:
             break

@@ -247,6 +247,7 @@ def test_html_to_text_keeps_structure():
 
 def test_feed_token_survives_extra_params_and_is_redacted_in_logs():
     import logging
+
     from radar.cli import _redact_log_record
     from radar.net import merge_query
     url, params = merge_query("https://www.reddit.com/user/a/saved/.rss?feed=SECRETTOKEN&user=a", {"limit": 100})

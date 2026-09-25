@@ -66,7 +66,7 @@ def item_dict(session: Session, item: Item, *, detail: bool = False) -> dict:
         }
     if detail:
         out["content"] = item.clean_text
-        out["body"] = readable_body(item) if community else None
+        out["body"] = readable_body(item) if community or item.content_type == "youtube_video" else None
         out["metadata"] = item.meta
         out["processing"] = {"extraction": item.extraction_state, "image": item.image_state,
                              "embedding": item.embedding_state, "cluster": item.cluster_state,
