@@ -4,7 +4,16 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from radar.db.models import CommunityPost, Enrichment, Item, ItemScore, Repository, SavedItem, StoryCluster
+from radar.db.models import (
+    CommunityPost,
+    Enrichment,
+    Image,
+    Item,
+    ItemScore,
+    Repository,
+    SavedItem,
+    StoryCluster,
+)
 from radar.services.community import community_info
 from radar.util import html_to_text, iso
 
@@ -41,6 +50,9 @@ def item_dict(session: Session, item: Item, *, detail: bool = False) -> dict:
                    "components": score.components, "evidence": score.evidence} if score else None),
         "why_it_matters": (item.meta or {}).get("why_it_matters"),
     }
+    image = session.get(Image, item.image_id) if item.image_id else None
+    if image is not None:
+        out["image"] = {"url": out["image_url"], "width": image.width, "height": image.height}
     community = session.get(CommunityPost, item.id)
     if community:
         out["community"] = community_info(community, item)

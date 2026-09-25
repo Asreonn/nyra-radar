@@ -11,6 +11,7 @@ from radar.extraction.canonical_url import url_hash
 from radar.extraction.images import ImageCache, ImageRejected, order_candidates
 from radar.net import Http, HttpError
 from radar.services.search import index_items
+from radar.services.settings import get as get_setting
 from radar.util import utcnow
 
 
@@ -60,7 +61,7 @@ async def cache_images(session: Session, http: Http, config: Config, limit: int 
 
     items = session.scalars(select(Item).where(Item.image_state == "pending")
                             .order_by(Item.first_seen_at.desc()).limit(limit)).all()
-    cache = ImageCache(http, image_cache_dir(), max_width=960)
+    cache = ImageCache(http, image_cache_dir(), max_width=int(get_setting(session, "images.max_width", 1280)))
     done = failed = 0
     for item in items:
         candidates = order_candidates(list((item.meta or {}).get("image_candidates", [])))

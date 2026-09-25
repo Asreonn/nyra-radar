@@ -21,6 +21,7 @@ from radar.extraction.canonical_url import (
     github_repo_from_url,
     url_hash,
 )
+from radar.extraction.images import priority
 from radar.normalization.models import RawItem
 from radar.normalization.normalize import Normalized, normalize
 from radar.services import repos as repo_svc
@@ -94,9 +95,14 @@ def _update_existing(item: Item, norm: Normalized, source: Source | None) -> boo
                 merged[k] = v
         if merged != item.meta:
             item.meta = merged
-    if (item.image_state in ("none", "failed") and f["meta"].get("image_candidates")
-            and any(tuple(c) not in known for c in f["meta"]["image_candidates"])):
+    fresh = [tuple(c) for c in f["meta"].get("image_candidates") or [] if tuple(c) not in known]
+    if fresh and item.image_state in ("none", "failed"):
         item.image_state = "pending"
+    elif fresh and item.image_state == "done":
+        # A better candidate than the cached one (e.g. the full-size Reddit image behind a thumbnail).
+        current = next((kind for kind, url in known if url == item.image_url), None)
+        if current is None or min(priority(kind) for kind, _ in fresh) < priority(current):
+            item.image_state = "pending"
     return changed
 
 

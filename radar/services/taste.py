@@ -65,7 +65,7 @@ def why(session: Session, item: Item) -> list[str]:
     elif name and affinity <= 0.4:
         reasons.append((0.5, f"You asked for less from {name}"))
     comm = evidence.get("community") or {}
-    if comm.get("listing") in RANKED_SORTS and comm.get("rank"):
+    if comm.get("listing") in RANKED_SORTS and comm.get("rank") and comm["rank"] <= 10:
         label = "on the front page" if comm["listing"] == "front" else f"in {name} {comm['listing']}"
         reasons.append((components.get("community_signal", 0), f"#{comm['rank']} {label}"))
     elif comm.get("score"):

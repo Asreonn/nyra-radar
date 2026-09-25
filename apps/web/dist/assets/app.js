@@ -13,6 +13,9 @@ const state = { fresh: true, cache: new Map(), items: new Map(), stash: new Map(
 const suppliedToken = new URLSearchParams(location.search).get('token');
 if (suppliedToken) { store.set('radar-token', suppliedToken); history.replaceState(null, '', location.pathname + location.hash); }
 const authToken = store.get('radar-token', null);
+// Posts first seen after the previous visit get a small "new" dot.
+state.lastVisit = Number(store.get('radar-last-visit', 0)) || 0;
+setTimeout(() => store.set('radar-last-visit', String(Date.now())), 8000);
 
 async function api(path, options = {}) {
   const headers = {'Content-Type': 'application/json', ...(authToken ? {Authorization: `Bearer ${authToken}`} : {})};
@@ -47,6 +50,7 @@ function sourceOf(item) {
 function metaLine(item, {author = false, source = true} = {}) {
   const src = sourceOf(item), c = item.community, r = item.repository;
   const parts = source ? [src.href ? `<a class="src" href="${src.href}">${esc(src.label)}</a>` : `<span class="src">${esc(src.label)}</span>`] : [];
+  if (state.lastVisit && item.first_seen_at && new Date(item.first_seen_at).getTime() > state.lastVisit) parts.unshift('<i class="new-dot" title="New since your last visit"></i>');
   if (author && item.author) parts.push(`<span>${c?.platform === 'reddit' ? 'u/' : ''}${esc(item.author)}</span>`);
   const when = item.published_at || item.first_seen_at;
   if (when) parts.push(`<span title="${esc(fullDate(when))}">${age(when)}</span>`);
@@ -112,14 +116,25 @@ function tuneActions(item) {
     <button class="btn" data-act="tune" data-vote="dislike" data-id="${item.id}">${icon('down')}Less like this</button>
     <button class="btn" data-act="tune" data-vote="skip" data-id="${item.id}">Not sure</button></div>`;
 }
+const MEDIA_BADGE = {gallery: 'Gallery', video: '▶ Video'};
+// Reddit image, gallery and video posts show their picture large, like Reddit; everything else a thumbnail.
+const isMediaPost = item => item.community?.kind === 'media' && item.image_url;
+function mediaBlock(item, href) {
+  const w = item.image?.width, h = item.image?.height, tall = w && h && h / w > 1.25;
+  const ratio = w && h && !tall ? ` style="aspect-ratio:${w} / ${h}"` : '';
+  const badge = MEDIA_BADGE[item.community?.media];
+  const backdrop = tall ? `<img class="backdrop" src="${esc(item.image_url)}" alt="" aria-hidden="true" loading="lazy">` : '';
+  return `<a class="media ${tall ? 'tall' : ''}" href="${href}"${ratio} aria-label="${esc(item.title)}">${backdrop}<img src="${esc(item.image_url)}" alt="" loading="lazy" decoding="async">${badge ? `<span class="badge">${badge}</span>` : ''}</a>`;
+}
 function entry(item, {tune = false, text = true, source = true} = {}) {
   state.items.set(item.id, item);
+  const big = isMediaPost(item);
   const blurb = text ? describe(item) : '';
   const href = item.repository?.id && item.type === 'github_repository' ? `#/project/${item.repository.id}` : `#/item/${item.id}`;
   const title = item.repository?.full_name && item.type === 'github_repository' ? item.repository.full_name : item.title;
-  return `<article class="entry" data-item="${item.id}"><div style="min-width:0">${metaLine(item, {source})}
-    <h3><a href="${href}">${esc(title)}</a></h3>${blurb ? `<p>${esc(blurb)}</p>` : ''}${tune ? tuneActions(item) : actions(item)}</div>
-    ${item.image_url ? `<a class="thumb" href="${href}" tabindex="-1" aria-hidden="true"><img src="${esc(item.image_url)}" alt="" loading="lazy" decoding="async"></a>` : ''}</article>`;
+  return `<article class="entry ${item.user?.read ? 'read' : ''}" data-item="${item.id}"><div style="min-width:0">${metaLine(item, {source})}
+    <h3><a href="${href}">${esc(title)}</a></h3>${big ? mediaBlock(item, href) : ''}${blurb ? `<p>${esc(blurb)}</p>` : ''}${tune ? tuneActions(item) : actions(item)}</div>
+    ${item.image_url && !big ? `<a class="thumb" href="${href}" tabindex="-1" aria-hidden="true"><img src="${esc(item.image_url)}" alt="" loading="lazy" decoding="async"></a>` : ''}</article>`;
 }
 const list = (items, opts) => `<div class="list">${items.map(i => entry(i, opts)).join('')}</div>`;
 
@@ -198,7 +213,7 @@ async function today() {
   const total = reddit.length + hnItems.length + rest.length + oss.length;
   let html = head('Today', total ? `${total} posts picked for you. Use ${icon('up')} and ${icon('down')} and Radar learns what you want.` : '', esc(date));
   if (!prof || prof.counts.ratings < 15) {
-    html += `<div class="box nudge"><p>Not what you want to read? Rate a dozen posts and the feed adapts to you.</p><a class="btn primary" href="#/tune" data-fresh="1">Tune your feed</a></div>`;
+    html += `<div class="box accent nudge"><p>Not what you want to read? Rate a dozen posts and the feed adapts to you.</p><a class="btn primary" href="#/tune" data-fresh="1">Tune your feed</a></div>`;
   }
   if (reddit.length) html += `<section class="sec">${secHead('Reddit', '<a href="#/reddit" data-fresh="1">See all →</a>')}${list(reddit)}</section>`;
   if (hnItems.length) html += `<section class="sec">${secHead('Hacker News', '<a href="#/hn" data-fresh="1">See all →</a>')}${list(hnItems, {text: false, source: false})}</section>`;
@@ -232,6 +247,16 @@ async function communityPage(platform, name) {
   state.feed.opts = {text: reddit, source: !oneSource};
   const body = feed.items.length ? list(feed.items, state.feed.opts) : empty(name ? `Nothing from r/${name} in this range` : 'Nothing in this range', '<p class="note">Try a longer time range.</p>');
   $('#main').innerHTML = head(title, lede) + chips + sorts + warn + `<div id="feed">${body}</div><div class="more-btn">${state.feed.done ? '' : '<button class="btn" data-act="more">Show more</button>'}</div>`;
+  observeMore();
+}
+// Infinite scroll: load the next page when "Show more" comes into view (the button still works).
+let moreObserver;
+function observeMore() {
+  moreObserver?.disconnect();
+  const btn = $('[data-act="more"]');
+  if (!btn || !('IntersectionObserver' in window)) return;
+  moreObserver = new IntersectionObserver(entries => { if (entries.some(e => e.isIntersecting) && !btn.disabled) loadMore(btn).then(observeMore).catch(() => {}); }, {rootMargin: '600px'});
+  moreObserver.observe(btn);
 }
 async function loadMore(btn) {
   const f = state.feed; if (!f || f.done) return;
@@ -291,7 +316,8 @@ async function detail(id, isProject = false) {
     <button class="btn ${liked ? 'on' : ''}" data-act="like" data-id="${item.id}">${icon('up')}More like this</button>
     <button class="btn" data-act="dislike" data-id="${item.id}">${icon('down')}Less like this</button>
     <button class="btn ${saved ? 'on' : ''}" data-act="save" data-id="${item.id}">${icon('save')}Save</button></div><div id="detail-fb"></div>`;
-  const hero = item.image_url && (c?.kind === 'media' || !c) ? `<div class="hero"><img src="${esc(item.image_url)}" alt=""></div>` : '';
+  const hero = item.image_url && (c?.kind === 'media' || !c)
+    ? `<div class="hero" data-act="zoom" data-src="${esc(item.image_url)}" title="Click to enlarge"><img src="${esc(item.image_url)}" alt=""></div>${c?.media === 'gallery' ? `<p class="note">First image of a gallery — <a class="link" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">see all on Reddit ↗</a></p>` : c?.media === 'video' ? `<p class="note">Video — <a class="link" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">play on Reddit ↗</a></p>` : ''}` : '';
   const body = item.body ? `<div class="prose">${prose(item.body)}</div>` : describe(item) ? `<div class="prose"><p>${esc(describe(item))}</p></div>` : '';
   const linked = item.content && (!item.body || item.content.length > item.body.length + 400)
     ? `<details class="more-text"><summary>${c ? `Read the linked page${item.link_url ? ` (${esc(hostOf(item.link_url))})` : ''}` : 'Read the full text'}</summary><div class="prose">${prose(item.content)}</div></details>` : '';
@@ -303,12 +329,38 @@ async function detail(id, isProject = false) {
     <h1>${esc(r?.full_name && item.type === 'github_repository' ? r.full_name : item.title)}</h1>${repo}${buttons}${hero}${body}${linked}${why}</article>${coverage}${talk}`;
   if (talk) loadComments(item.id, false);
 }
+// Comments arrive compact: three top-level comments clamped to three lines, replies folded.
+const COMPACT_TOP = 3;
+function commentTree(comments) {
+  const roots = [], stack = [];
+  for (const c of comments) {
+    const node = {...c, children: []}, depth = Math.max(0, Math.min(c.depth || 0, stack.length));
+    stack.length = depth;
+    (depth ? stack[depth - 1].children : roots).push(node);
+    stack.push(node);
+  }
+  return roots;
+}
+const countAll = nodes => nodes.reduce((n, x) => n + 1 + countAll(x.children), 0);
+function commentHtml(node) {
+  const long = (node.text || '').length > 260 || (node.text || '').split('\n').length > 3;
+  const replies = countAll(node.children);
+  return `<div class="cmt"><div class="meta"><b>${esc(node.author || 'anonymous')}</b><span class="sep"></span><span title="${esc(fullDate(node.created_at))}">${age(node.created_at)}</span>${node.score != null ? `<span class="sep"></span><span>${plural(node.score, 'point')}</span>` : ''}</div>
+    <div class="cmt-text ${long ? 'clamp' : ''}" ${long ? 'data-act="expand-comment" title="Show the whole comment"' : ''}>${prose(node.text)}</div>
+    ${long || replies ? `<div class="cmt-actions">${long ? '<button data-act="expand-comment">Read more</button>' : ''}${replies ? `<button data-act="toggle-replies">▸ ${plural(replies, 'reply', 'replies')}</button>` : ''}</div>` : ''}
+    ${replies ? `<div class="replies" hidden>${node.children.map(commentHtml).join('')}</div>` : ''}</div>`;
+}
 async function loadComments(id, refresh) {
   const box = $('#comments'); if (!box) return;
   try {
     const t = await api(`/items/${id}/comments${refresh ? '?refresh=true' : ''}`);
     if (!t.comments.length) { box.innerHTML = `<p class="note">${t.error ? `Couldn't load comments (${esc(t.error)}).` : 'No comments yet.'}</p>`; return; }
-    box.innerHTML = `<div class="comments">${t.comments.map(cm => `<div class="comment" style="--d:${Math.min(cm.depth || 0, 5)}"><div><div class="meta"><b>${esc(cm.author || 'anonymous')}</b><span class="sep"></span><span title="${esc(fullDate(cm.created_at))}">${age(cm.created_at)}</span>${cm.score != null ? `<span class="sep"></span><span>${plural(cm.score, 'point')}</span>` : ''}</div><div class="prose">${prose(cm.text)}</div></div></div>`).join('')}</div>`;
+    const roots = commentTree(t.comments), item = state.items.get(Number(id));
+    const shown = roots.slice(0, COMPACT_TOP), rest = roots.slice(COMPACT_TOP);
+    const total = item?.community?.comments;
+    box.innerHTML = `<div class="comments">${shown.map(commentHtml).join('')}${rest.length ? `<div class="more-comments" hidden>${rest.map(commentHtml).join('')}</div>` : ''}</div>
+      ${rest.length ? `<button class="show-all" data-act="all-comments">Show ${plural(rest.length, 'more comment')}</button>` : ''}
+      <p class="note">${total && total > t.comments.length ? `Showing ${t.comments.length} of ${compact(total)}. <a class="link" href="${esc(item ? discussionUrl(item) : '#')}" target="_blank" rel="noopener">All comments on ${item?.community?.platform === 'hackernews' ? 'Hacker News' : 'Reddit'} ↗</a>` : ''}</p>`;
   } catch (err) { box.innerHTML = `<p class="note">Couldn't load comments (${esc(err.message)}).</p>`; }
 }
 
@@ -463,6 +515,10 @@ document.addEventListener('click', e => {
   else if (act === 'project-sort') projects(el.dataset.sort);
   else if (act === 'source-status') api(`/sources/${el.dataset.id}`, {method: 'PATCH', body: JSON.stringify({status: el.dataset.status})}).then(() => { toast('Updated'); state.fresh = true; route(); }).catch(err => toast(err.message));
   else if (act === 'refresh-comments') { e.preventDefault(); loadComments(el.dataset.id, true); }
+  else if (act === 'zoom') openLightbox(el.dataset.src);
+  else if (act === 'expand-comment') { const c = el.closest('.cmt'); const t = $('.cmt-text', c); t.classList.remove('clamp'); t.removeAttribute('data-act'); $('.cmt-actions [data-act="expand-comment"]', c)?.remove(); }
+  else if (act === 'toggle-replies') { const r = el.closest('.cmt').querySelector(':scope > .replies'); r.hidden = !r.hidden; el.textContent = el.textContent.replace(/^[▸▾]/, r.hidden ? '▸' : '▾'); }
+  else if (act === 'all-comments') { $('.more-comments').hidden = false; el.remove(); }
   else if (act === 'sync-reddit') accountAction('sync', el);
   else if (act === 'disconnect-reddit') accountAction('disconnect', el);
 });
@@ -480,6 +536,48 @@ document.addEventListener('submit', e => {
   if (form.dataset.act === 'add-source') post('/sources', {kind: form.kind.value, identifier: form.identifier.value}).then(() => { toast('Source added'); sources(); }).catch(err => toast(err.message));
 });
 document.addEventListener('click', e => { const menu = $('.menu'); if (menu?.open && !e.target.closest('.menu')) menu.removeAttribute('open'); });
+
+// ---------------------------------------------------------------- lightbox & keyboard
+function openLightbox(src) {
+  if (!src) return;
+  const box = document.createElement('div');
+  box.className = 'lightbox'; box.innerHTML = `<img src="${esc(src)}" alt="">`;
+  box.onclick = () => box.remove();
+  document.body.append(box);
+}
+const KEYS = [['j / k', 'next / previous post'], ['o or Enter', 'open'], ['l', 'more like this'], ['d', 'less like this'], ['s', 'save'], ['x', 'hide'], ['/', 'search'], ['?', 'this help'], ['Esc', 'close']];
+function toggleHelp() {
+  const open = $('.kbd-help');
+  if (open) { open.remove(); return; }
+  const box = document.createElement('div');
+  box.className = 'kbd-help';
+  box.innerHTML = `<div><h2>Keyboard</h2><dl>${KEYS.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl></div>`;
+  box.onclick = () => box.remove();
+  document.body.append(box);
+}
+function moveFocus(step) {
+  const entries = $$('#main .entry');
+  if (!entries.length) return;
+  const current = entries.findIndex(x => x.classList.contains('kb'));
+  const next = entries[Math.max(0, Math.min(entries.length - 1, current + step))];
+  entries.forEach(x => x.classList.remove('kb'));
+  next.classList.add('kb');
+  next.scrollIntoView({block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth'});
+}
+document.addEventListener('keydown', e => {
+  if (/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === 'Escape') { $('.lightbox')?.remove(); $('.kbd-help')?.remove(); return; }
+  if (e.key === '?') { toggleHelp(); return; }
+  if (e.key === 'j' || e.key === 'k') { e.preventDefault(); moveFocus(e.key === 'j' ? 1 : -1); return; }
+  const focused = $('#main .entry.kb');
+  if (!focused) return;
+  const press = act => focused.querySelector(`[data-act="${act}"]`)?.click();
+  if (e.key === 'o' || e.key === 'Enter') focused.querySelector('h3 a')?.click();
+  else if (e.key === 'l') press('like');
+  else if (e.key === 'd') press('dislike');
+  else if (e.key === 's') press('save');
+  else if (e.key === 'x') press('hide');
+});
 
 // ---------------------------------------------------------------- routing (Back restores list pages and scroll)
 const CACHEABLE = new Set(['today', 'reddit', 'hn', 'explore', 'projects', 'saved', 'history', 'search']);
@@ -521,6 +619,6 @@ async function route() {
 $('#search').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.value.trim()) { state.fresh = true; location.hash = `#/search/${encodeURIComponent(e.target.value.trim())}`; e.target.blur(); } });
 $('#search-toggle').addEventListener('click', () => { $('.top').classList.toggle('searching'); $('#search').focus(); });
 document.addEventListener('keydown', e => { if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) { e.preventDefault(); $('.top').classList.add('searching'); $('#search').focus(); } });
-$('#theme').onclick = () => { const dark = document.documentElement.classList.toggle('dark'); store.set('radar-theme', dark ? 'dark' : 'light'); };
+$('#theme').onclick = () => { const light = document.documentElement.classList.toggle('light'); store.set('radar-theme', light ? 'light' : 'dark'); };
 window.addEventListener('hashchange', route);
 route();
