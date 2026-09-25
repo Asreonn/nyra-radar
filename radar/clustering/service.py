@@ -82,6 +82,8 @@ def cluster_pending(session: Session, limit: int = 300) -> int:
                 other.link_hash and other.link_hash == item.url_hash
             )
             exact_title = bool(item.title_hash and item.title_hash == other.title_hash)
+            if item.source_id and item.source_id == other.source_id and not (exact_target or exact_title):
+                continue  # a story is coverage across sources; one channel's videos share boilerplate text
             simhash_close = bool(item.simhash is not None and other.simhash is not None and
                                  hamming(item.simhash, other.simhash) <= 5)
             sim = _similarity(embeddings.get(item.id), embeddings.get(other.id))

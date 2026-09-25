@@ -27,6 +27,13 @@ def mask_feed_url(value: str) -> str:
     return redact_feed_tokens(value) or value
 
 
+def feed_excluded(item: Item) -> bool:
+    """Posts the user already reacted to on Reddit, or that only arrived through a live search,
+    stay out of the ranked feeds (they remain searchable and openable)."""
+    meta = item.meta or {}
+    return bool(meta.get("reddit_account") or meta.get("via_search"))
+
+
 def normalize_subreddit(value: str) -> str | None:
     """'r/LocalLLaMA', '/r/rust/', 'https://www.reddit.com/r/linux/top' -> subreddit name.
     Reddit feed URLs (private front page, multireddits as .rss) are kept whole."""
@@ -78,7 +85,7 @@ def community_feed(session: Session, *, platform: str = "reddit", community: str
         names = [c.strip().lower() for c in community.split(",") if c.strip()]
         stmt = stmt.where(func.lower(CommunityPost.community).in_(names))
     rows = session.execute(stmt.order_by(Item.first_seen_at.desc()).limit(3000)).all()
-    rows = [r for r in rows if not (r[0].meta or {}).get("reddit_account")]  # already upvoted/saved there
+    rows = [r for r in rows if not feed_excluded(r[0])]
     rows.sort(key=lambda r: _sort_key(sort, *r), reverse=True)
     return [r[0] for r in rows[offset:offset + limit]]
 
@@ -132,3 +139,25 @@ def list_subreddits(session: Session) -> list[dict]:
     out.sort(key=lambda r: (r["source"] is None, -r["items_24h"], -r["items"], r["name"].lower()))
     return out
 
+
+
+def keep_reading(session: Session, *, offset: int = 0, limit: int = 20, hours: int = 96,
+                 exclude: set[int] | None = None) -> list[Item]:
+    """Everything worth reading, best first, one item per story, for the endless tail of Today."""
+    cutoff = utcnow() - timedelta(hours=hours)
+    rows = session.execute(
+        select(Item, ItemScore).join(ItemScore, ItemScore.item_id == Item.id)
+        .where(Item.first_seen_at >= cutoff, Item.is_hidden.is_(False), Item.duplicate_of.is_(None))
+        .order_by(ItemScore.final_score.desc()).limit(3000)
+    ).all()
+    seen_clusters: set[int] = set()
+    out: list[Item] = []
+    for item, _score in rows:
+        if feed_excluded(item) or (exclude and item.id in exclude):
+            continue
+        if item.cluster_id:
+            if item.cluster_id in seen_clusters:
+                continue
+            seen_clusters.add(item.cluster_id)
+        out.append(item)
+    return out[offset:offset + limit]

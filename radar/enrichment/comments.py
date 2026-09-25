@@ -18,11 +18,22 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from radar.collectors.feedutil import entry_html, entry_published
-from radar.collectors.reddit import JSON_BLOCK_HOURS, WWW, RedditAuth, reddit_json, reddit_rss
+from radar.collectors.reddit import (
+    JSON_BLOCK_HOURS,
+    WWW,
+    RedditAuth,
+    post_to_raw,
+    reddit_json,
+    reddit_rss,
+    rss_entry_to_raw,
+    selftext_with_images,
+)
 from radar.config import Config
 from radar.db.models import KV, CommentSummary, CommunityPost, Item, ItemScore
+from radar.extraction.images import order_candidates, reopen_image_stage
 from radar.net import Http, HttpError
-from radar.util import html_to_text, iso, parse_datetime, utcnow
+from radar.normalization.models import RawItem
+from radar.util import html_to_text, iso, normalize_ws, parse_datetime, strip_html, truncate, utcnow
 
 MAX_COMMENTS = 60
 MAX_DEPTH = 5
@@ -75,7 +86,8 @@ def _mark_json_blocked(session: Session) -> None:
 
 
 async def _reddit_thread(session: Session, http: Http, config: Config,
-                         post: CommunityPost) -> tuple[list[dict[str, Any]], str]:
+                         post: CommunityPost) -> tuple[list[dict[str, Any]], str, RawItem | None]:
+    """Comments plus the post itself as the thread presents it (the most complete copy of its text)."""
     sub = post.community or "all"
     auth = RedditAuth(http, config)
     if auth.enabled or not _json_blocked(session):
@@ -83,24 +95,62 @@ async def _reddit_thread(session: Session, http: Http, config: Config,
             data = await reddit_json(http, auth, f"/r/{sub}/comments/{post.post_id}",
                                      {"limit": MAX_COMMENTS, "depth": MAX_DEPTH, "sort": "top"})
             out: list[dict[str, Any]] = []
+            first = None
             if isinstance(data, list) and len(data) > 1:
                 _walk_reddit((data[1].get("data") or {}).get("children") or [], 0, out)
-            return out, "oauth" if auth.enabled else "json"
+                children = (data[0].get("data") or {}).get("children") or []
+                first = post_to_raw(children[0].get("data") or {}) if children else None
+            return out, "oauth" if auth.enabled else "json", first
         except (HttpError, ValueError, KeyError):
             if not auth.enabled:
                 _mark_json_blocked(session)
     parsed = await reddit_rss(http, f"{WWW}/r/{sub}/comments/{post.post_id}/.rss",
                               {"limit": MAX_COMMENTS, "sort": "top"})
     out = []
+    first = None
     for entry in parsed.entries:
         cid = entry.get("id") or ""
         author = (entry.get("author") or "").removeprefix("/u/").strip()
+        if cid.startswith("t3_"):
+            first = rss_entry_to_raw(entry)
+            continue
         if not cid.startswith("t1_") or author in BOT_AUTHORS:
             continue
-        text = html_to_text(entry_html(entry))
+        text, _ = selftext_with_images(entry_html(entry))
         if text:
             out.append(_comment(cid.removeprefix("t1_"), author or None, text, 0, entry_published(entry)))
-    return out[:MAX_COMMENTS], "rss"
+    return out[:MAX_COMMENTS], "rss", first
+
+
+def refresh_post(item: Item, raw: RawItem | None) -> bool:
+    """Take the thread's copy of a Reddit post when it is fuller than what the listing gave us:
+    longer text, inline images, better picture candidates."""
+    if raw is None:
+        return False
+    changed = False
+    text = (raw.text or "").strip()
+    if text and len(text) > len(item.raw_text or ""):
+        item.raw_text = text
+        clean = strip_html(text) if raw.text_is_html else normalize_ws(text)
+        if len(clean) > len(item.clean_text or ""):
+            item.clean_text = clean
+            item.excerpt = truncate(clean, 700)
+            item.embedding_state = "stale" if item.embedding_state == "done" else item.embedding_state
+        changed = True
+    meta = dict(item.meta or {})
+    for key in ("inline_images", "media_type", "media_url"):
+        if raw.meta.get(key) and not meta.get(key):
+            meta[key] = raw.meta[key]
+            changed = True
+    before = [tuple(c) for c in meta.get("image_candidates", [])]
+    after = order_candidates(before + [tuple(c) for c in raw.image_candidates])
+    if after != before:
+        meta["image_candidates"] = after
+        reopen_image_stage(item, before, after)
+        changed = True
+    if changed:
+        item.meta = meta
+    return changed
 
 
 async def _hn_thread(http: Http, post: CommunityPost) -> tuple[list[dict[str, Any]], str]:
@@ -115,9 +165,11 @@ async def fetch_thread(session: Session, http: Http, config: Config, item: Item)
     post = session.get(CommunityPost, item.id)
     if post is None or post.platform not in ("reddit", "hackernews"):
         raise ValueError("item has no supported discussion thread")
+    session.commit()  # no transaction stays open across the network fetch (WAL snapshot rule)
     try:
         if post.platform == "reddit":
-            comments, via = await _reddit_thread(session, http, config, post)
+            comments, via, first = await _reddit_thread(session, http, config, post)
+            refresh_post(item, first)
         else:
             comments, via = await _hn_thread(http, post)
     except (HttpError, ValueError):

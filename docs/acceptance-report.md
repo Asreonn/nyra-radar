@@ -98,3 +98,13 @@ Measured in a fresh scratch database (hash embeddings, no LLM) against the live 
 - Detail: full Reddit text; comments compact (3 top-level shown, 24 folded reply threads on a 60-comment HN thread, "Show more" → all 60, "Read more" unclamps); lightbox opens and closes with Esc; infinite scroll 30 → 60 posts; `j`/`k` focus and `?` help work.
 - Fixed a latent import cycle (normalize → clustering package → clustering.service → normalize) that broke `import radar.services.collect` when imported first.
 - Automated checks: Ruff clean; Pytest 20 passed; `scripts/ui_check.py` passes on Today and Reddit at 360×800, 412×915 and 1920×1080.
+
+## Addendum — complete posts, YouTube, Discover, live search, summaries (2026-09-25)
+
+- Missing pictures, root causes: link posts waited on a 12-per-cycle extraction and, when the image stage had already run, never retried after og:image arrived (60 of 114 link posts in the scratch DB had no picture); text posts' inline images were double-escaped links. Now: extraction batch from settings (30) and best-ranked first, new candidates re-open the image stage, inline Reddit images become full-size candidates and render in place, images are cached every cycle.
+- Complete posts on open: hydrate returned in 0.79 s with 55 comments via the thread feed; a text post's inline chart rendered at its original 1194×1134 through `/media/remote`.
+- YouTube: 24 channel handles resolved to ids and each feed fetched (15 entries each); 8 default channels collected 101 videos with Shorts skipped. 25 of 26 candidate RSS feeds verified (Import AI 403, not included).
+- Live search: Hacker News 25 results; Reddit search feed 200 (after a temporary 429 from this sandbox's IP — the UI now reports rate limiting plainly).
+- Concurrency: two SQLite issues found and fixed — image rows were flushed before their download (holding the write lock across network I/O), and read-then-write transactions could hit the WAL snapshot conflict; downloads now happen before writes, network-bound stages commit first, FTS indexing writes first, the worker commits right after ranking, and a busy database answers 503 which the UI retries. A save during a running hydrate took 8 ms.
+- Same-source items no longer form "stories" (two videos of one channel shared description boilerplate).
+- Automated checks: Ruff clean; Pytest 25 passed; `scripts/ui_check.py` (now waits for rendered entries) passes on Today and Reddit at 360×800, 412×915 and 1920×1080.

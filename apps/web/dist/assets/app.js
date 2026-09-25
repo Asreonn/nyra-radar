@@ -9,7 +9,7 @@ const store = {
   get(key, fallback) { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } },
   set(key, value) { try { localStorage.setItem(key, value); } catch { /* private mode */ } },
 };
-const state = { fresh: true, cache: new Map(), items: new Map(), stash: new Map(), timers: new Map(), opened: new Set() };
+const state = { fresh: true, cache: new Map(), items: new Map(), stash: new Map(), timers: new Map(), opened: new Set(), briefs: new Map(), searchTab: 'radar' };
 const suppliedToken = new URLSearchParams(location.search).get('token');
 if (suppliedToken) { store.set('radar-token', suppliedToken); history.replaceState(null, '', location.pathname + location.hash); }
 const authToken = store.get('radar-token', null);
@@ -17,10 +17,16 @@ const authToken = store.get('radar-token', null);
 state.lastVisit = Number(store.get('radar-last-visit', 0)) || 0;
 setTimeout(() => store.set('radar-last-visit', String(Date.now())), 8000);
 
-async function api(path, options = {}) {
+async function api(path, options = {}, attempt = 0) {
   const headers = {'Content-Type': 'application/json', ...(authToken ? {Authorization: `Bearer ${authToken}`} : {})};
   const response = await fetch('/api/v1' + path, {headers, ...options});
-  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
+  const detail = response.ok ? null : (await response.json().catch(() => ({}))).detail;
+  // The local database can be briefly busy while the worker writes; retry a couple of times.
+  if (response.status === 503 && detail === 'database busy, retry' && attempt < 3) {
+    await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
+    return api(path, options, attempt + 1);
+  }
+  if (!response.ok) throw new Error(detail || `HTTP ${response.status}`);
   return response.json();
 }
 const post = (path, body = {}) => api(path, {method: 'POST', body: JSON.stringify(body)});
@@ -44,7 +50,7 @@ function sourceOf(item) {
   if (c?.platform === 'reddit' && c.name) return {label: `r/${c.name}`, href: `#/reddit/${encodeURIComponent(c.name)}`};
   if (c?.platform === 'hackernews') return {label: 'Hacker News', href: '#/hn'};
   if (item.type?.startsWith('github')) return {label: 'GitHub', href: '#/projects'};
-  if (item.type === 'youtube_video') return {label: item.source?.name?.replace(/^YouTube · /, '') || 'YouTube'};
+  if (item.type === 'youtube_video') return {label: item.source?.name?.replace(/^YouTube · /, '') || item.author || 'YouTube', href: item.source ? `#/videos/${item.source.id}` : '#/videos'};
   return {label: item.source?.name || hostOf(item.url) || 'Web'};
 }
 function metaLine(item, {author = false, source = true} = {}) {
@@ -55,6 +61,7 @@ function metaLine(item, {author = false, source = true} = {}) {
   const when = item.published_at || item.first_seen_at;
   if (when) parts.push(`<span title="${esc(fullDate(when))}">${age(when)}</span>`);
   if (c?.votes_known && c.score != null) parts.push(`<span>${plural(c.score, 'point')}</span>`);
+  if (item.type === 'youtube_video' && item.external?.score) parts.push(`<span>${plural(item.external.score, 'view')}</span>`);
   if (r) {
     if (r.stars != null) parts.push(`<span>★ ${compact(r.stars)}</span>`);
     if (r.stars_delta_7d) parts.push(`<span>+${compact(r.stars_delta_7d)} this week</span>`);
@@ -75,6 +82,8 @@ function inline(text) {
   s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>').replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:!?]|$)/g, '$1<em>$2</em>');
   return s.replace(/\n/g, '<br>');
 }
+// A paragraph that is only a Reddit/imgur image link is shown as the picture itself.
+const IMAGE_URL = /^https:\/\/(?:i\.redd\.it|preview\.redd\.it|i\.imgur\.com)\/[^\s]+$/;
 function prose(text) {
   const src = String(text || '').replace(/\r/g, '').replace(/&amp;#x200B;|​/g, '').trim();
   const blocks = [];
@@ -82,7 +91,8 @@ function prose(text) {
     const b = part.trim();
     if (!b) continue;
     const lines = b.split('\n');
-    if (b.startsWith('```')) blocks.push(`<pre><code>${esc(b.replace(/^```[^\n]*\n?/, '').replace(/```$/, ''))}</code></pre>`);
+    if (IMAGE_URL.test(b)) blocks.push(`<figure class="inline-img"><img src="/media/remote?u=${encodeURIComponent(b)}" alt="" loading="lazy" decoding="async" data-act="zoom" data-src="/media/remote?u=${encodeURIComponent(b)}"></figure>`);
+    else if (b.startsWith('```')) blocks.push(`<pre><code>${esc(b.replace(/^```[^\n]*\n?/, '').replace(/```$/, ''))}</code></pre>`);
     else if (lines.every(l => /^\s*([-*•]|\d+[.)])\s+/.test(l))) blocks.push(`<ul>${lines.map(l => `<li>${inline(l.replace(/^\s*([-*•]|\d+[.)])\s+/, ''))}</li>`).join('')}</ul>`);
     else if (lines.every(l => /^\s*>/.test(l))) blocks.push(`<blockquote>${inline(b.replace(/^\s*>\s?/gm, ''))}</blockquote>`);
     else if (/^#{1,6}\s/.test(b)) blocks.push(`<p><strong>${inline(b.replace(/^#{1,6}\s+/, ''))}</strong></p>`);
@@ -116,13 +126,14 @@ function tuneActions(item) {
     <button class="btn" data-act="tune" data-vote="dislike" data-id="${item.id}">${icon('down')}Less like this</button>
     <button class="btn" data-act="tune" data-vote="skip" data-id="${item.id}">Not sure</button></div>`;
 }
-const MEDIA_BADGE = {gallery: 'Gallery', video: '▶ Video'};
+const MEDIA_BADGE = {gallery: 'Gallery', video: '▶ Video', youtube: '▶ YouTube'};
 // Reddit image, gallery and video posts show their picture large, like Reddit; everything else a thumbnail.
-const isMediaPost = item => item.community?.kind === 'media' && item.image_url;
+const isMediaPost = item => item.image_url && (item.community?.kind === 'media' || item.type === 'youtube_video');
 function mediaBlock(item, href) {
-  const w = item.image?.width, h = item.image?.height, tall = w && h && h / w > 1.25;
+  const yt = item.type === 'youtube_video';
+  const w = yt ? 16 : item.image?.width, h = yt ? 9 : item.image?.height, tall = w && h && h / w > 1.25;
   const ratio = w && h && !tall ? ` style="aspect-ratio:${w} / ${h}"` : '';
-  const badge = MEDIA_BADGE[item.community?.media];
+  const badge = MEDIA_BADGE[item.type === 'youtube_video' ? 'youtube' : item.community?.media];
   const backdrop = tall ? `<img class="backdrop" src="${esc(item.image_url)}" alt="" aria-hidden="true" loading="lazy">` : '';
   return `<a class="media ${tall ? 'tall' : ''}" href="${href}"${ratio} aria-label="${esc(item.title)}">${backdrop}<img src="${esc(item.image_url)}" alt="" loading="lazy" decoding="async">${badge ? `<span class="badge">${badge}</span>` : ''}</a>`;
 }
@@ -197,10 +208,11 @@ function detailFeedback(item) {
 // ---------------------------------------------------------------- Today
 async function today() {
   loading();
-  const [d, hn, prof] = await Promise.all([
+  const [d, hn, prof, vids] = await Promise.all([
     api('/digest?period=7d&limit=40&requested_by=ui'),
     api('/community?platform=hackernews&sort=hot&period=2d&limit=16').catch(() => ({items: []})),
     api('/profile').catch(() => null),
+    api('/items?content_type=youtube_video&sort=score&period=3d&limit=8').catch(() => ({items: []})),
   ]);
   const by = Object.fromEntries(d.sections.map(s => [s.key, s.items]));
   const inDigest = new Set(d.sections.flatMap(s => s.items.map(i => i.id)));
@@ -209,18 +221,24 @@ async function today() {
   const seen = new Set(); const rest = [];
   for (const key of ['important', 'for_you', 'adjacent', 'wildcard']) for (const i of by[key] || []) if (!seen.has(i.id)) { seen.add(i.id); rest.push(i); }
   const oss = (by.oss || []).slice(0, 4);
+  const videos = vids.items.filter(i => !inDigest.has(i.id)).slice(0, 4);
   const date = new Date().toLocaleDateString(undefined, {weekday: 'long', day: 'numeric', month: 'long'});
-  const total = reddit.length + hnItems.length + rest.length + oss.length;
+  const total = reddit.length + hnItems.length + rest.length + oss.length + videos.length;
   let html = head('Today', total ? `${total} posts picked for you. Use ${icon('up')} and ${icon('down')} and Radar learns what you want.` : '', esc(date));
   if (!prof || prof.counts.ratings < 15) {
     html += `<div class="box accent nudge"><p>Not what you want to read? Rate a dozen posts and the feed adapts to you.</p><a class="btn primary" href="#/tune" data-fresh="1">Tune your feed</a></div>`;
   }
   if (reddit.length) html += `<section class="sec">${secHead('Reddit', '<a href="#/reddit" data-fresh="1">See all →</a>')}${list(reddit)}</section>`;
   if (hnItems.length) html += `<section class="sec">${secHead('Hacker News', '<a href="#/hn" data-fresh="1">See all →</a>')}${list(hnItems, {text: false, source: false})}</section>`;
+  if (videos.length) html += `<section class="sec">${secHead('Videos', '<a href="#/videos" data-fresh="1">See all →</a>')}${list(videos, {text: false})}</section>`;
   if (rest.length) html += `<section class="sec">${secHead('Worth reading')}${list(rest)}</section>`;
   if (oss.length) html += `<section class="sec">${secHead('Open source', '<a href="#/projects" data-fresh="1">See all →</a>')}${list(oss)}</section>`;
   if (!total) html += empty('Nothing collected yet', '<p class="note">The worker collects every few minutes, or run <code>radar collect --force</code>.</p>');
+  const shown = [...reddit, ...hnItems, ...rest, ...oss, ...videos].map(i => i.id);
+  if (total) html += `<section class="sec">${secHead('Keep reading', '<a href="#/discover" data-fresh="1">Discover sources →</a>')}<div id="feed"><div class="list"></div></div><div class="more-btn"><button class="btn" data-act="more">Show more</button></div></section>`;
+  state.feed = {q: `/feed?limit=20&exclude=${shown.join(',')}`, offset: 0, done: false, size: 20, opts: {}};
   $('#main').innerHTML = html;
+  observeMore();
 }
 
 // ---------------------------------------------------------------- Reddit / Hacker News
@@ -263,7 +281,7 @@ async function loadMore(btn) {
   btn.disabled = true; btn.textContent = 'Loading…';
   const data = await api(`${f.q}&offset=${f.offset}`);
   $('#feed .list').insertAdjacentHTML('beforeend', data.items.map(i => entry(i, f.opts)).join(''));
-  f.offset += data.items.length; f.done = data.items.length < 30;
+  f.offset += data.items.length; f.done = data.items.length < (f.size || 30);
   btn.parentElement.innerHTML = f.done ? '' : '<button class="btn" data-act="more">Show more</button>';
 }
 
@@ -303,12 +321,34 @@ async function tuneUndo(btn) {
 async function detail(id, isProject = false) {
   loading();
   const d = await api(isProject ? `/projects/${id}` : `/items/${id}`);
-  const item = d.project || d.item, c = item.community, r = item.repository;
+  const item = d.project || d.item;
   state.items.set(item.id, item);
   if (!state.opened.has(item.id)) { state.opened.add(item.id); feedback(item.id, 'open').catch(() => {}); }
   const story = item.cluster_id ? await api(`/stories/${item.cluster_id}`).catch(() => null) : null;
+  renderDetail(item, story, null, {hydrating: true});
+  const here = location.hash;
+  if (!state.briefs.has(item.id)) api(`/items/${item.id}/brief`).then(b => { if (b.brief && location.hash === here) { state.briefs.set(item.id, b.brief); $('#brief').outerHTML = briefBox(item); } }).catch(() => {});
+  // Complete the post on open: the thread's full text and inline images, the linked article, the picture, comments.
+  post(`/items/${item.id}/hydrate`)
+    .then(h => { if (location.hash === here) renderDetail({...item, ...h.item}, story, h.thread, {keepScroll: true}); })
+    .catch(err => { if (location.hash === here) renderDetail(item, story, null, {error: err.message, keepScroll: true}); });
+}
+function videoId(item) {
+  const m = /[?&]v=([A-Za-z0-9_-]{11})/.exec(item.url || '') || /youtu\.be\/([A-Za-z0-9_-]{11})/.exec(item.url || '');
+  return item.metadata?.video_id || (m && m[1]);
+}
+function briefBox(item) {
+  const b = state.briefs.get(item.id);
+  if (!b) return `<div id="brief" class="brief-cta"><button class="btn" data-act="brief" data-id="${item.id}">✦ Summarize${item.community ? ' post & discussion' : ''}</button><span class="note" id="brief-note"></span></div>`;
+  const points = xs => xs?.length ? `<ul>${xs.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '';
+  return `<div id="brief" class="brief"><div class="kicker">✦ Summary</div><p>${esc(b.tldr)}</p>${points(b.key_points)}
+    ${b.discussion ? `<div class="kicker" style="margin-top:10px">What people say</div><p>${esc(b.discussion)}</p>${points(b.discussion_points)}` : ''}
+    <p class="note">${esc(b.model || 'local model')} · <a href="#" class="link" data-act="brief" data-refresh="1" data-id="${item.id}">Refresh</a></p></div>`;
+}
+function renderDetail(item, story, thread, {hydrating = false, keepScroll = false, error = null} = {}) {
+  const c = item.community, r = item.repository;
   const liked = item.user?.vote === 1, saved = item.user?.saved;
-  const platform = c?.platform === 'reddit' ? 'Reddit' : c?.platform === 'hackernews' ? 'Hacker News' : null;
+  const platform = c?.platform === 'reddit' ? 'Reddit' : c?.platform === 'hackernews' ? 'Hacker News' : item.type === 'youtube_video' ? 'YouTube' : null;
   const out = [];
   if (platform) out.push(`<a class="btn" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">${icon('out')}Open on ${platform}</a>`);
   if (item.link_url || !platform) out.push(`<a class="btn" href="${esc(item.link_url || item.url)}" target="_blank" rel="noopener">${icon('out')}${esc(hostOf(item.link_url || item.url) || 'Open original')}</a>`);
@@ -316,18 +356,43 @@ async function detail(id, isProject = false) {
     <button class="btn ${liked ? 'on' : ''}" data-act="like" data-id="${item.id}">${icon('up')}More like this</button>
     <button class="btn" data-act="dislike" data-id="${item.id}">${icon('down')}Less like this</button>
     <button class="btn ${saved ? 'on' : ''}" data-act="save" data-id="${item.id}">${icon('save')}Save</button></div><div id="detail-fb"></div>`;
-  const hero = item.image_url && (c?.kind === 'media' || !c)
-    ? `<div class="hero" data-act="zoom" data-src="${esc(item.image_url)}" title="Click to enlarge"><img src="${esc(item.image_url)}" alt=""></div>${c?.media === 'gallery' ? `<p class="note">First image of a gallery — <a class="link" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">see all on Reddit ↗</a></p>` : c?.media === 'video' ? `<p class="note">Video — <a class="link" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">play on Reddit ↗</a></p>` : ''}` : '';
-  const body = item.body ? `<div class="prose">${prose(item.body)}</div>` : describe(item) ? `<div class="prose"><p>${esc(describe(item))}</p></div>` : '';
-  const linked = item.content && (!item.body || item.content.length > item.body.length + 400)
-    ? `<details class="more-text"><summary>${c ? `Read the linked page${item.link_url ? ` (${esc(hostOf(item.link_url))})` : ''}` : 'Read the full text'}</summary><div class="prose">${prose(item.content)}</div></details>` : '';
+  const vid = item.type === 'youtube_video' && videoId(item);
+  let hero = '';
+  // Click-to-play: YouTube is only contacted once you press play (privacy-enhanced domain).
+  if (vid) hero = `<button class="yt" data-act="play" data-vid="${esc(vid)}" aria-label="Play video">${item.image_url ? `<img src="${esc(item.image_url)}" alt="">` : ''}<span class="play">▶</span></button>`;
+  else if (item.image_url && (c?.kind === 'media' || !c)) {
+    hero = `<div class="hero" data-act="zoom" data-src="${esc(item.image_url)}" title="Click to enlarge"><img src="${esc(item.image_url)}" alt=""></div>`;
+    if (c?.media === 'gallery') hero += `<p class="note">First image of a gallery — <a class="link" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">see all on Reddit ↗</a></p>`;
+    if (c?.media === 'video') hero += `<p class="note">Video — <a class="link" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">play on Reddit ↗</a></p>`;
+  }
+  const bodyText = item.body || (item.type === 'youtube_video' ? item.content : '') || '';
+  const body = bodyText ? `<div class="prose">${prose(bodyText)}</div>` : describe(item) ? `<div class="prose"><p>${esc(describe(item))}</p></div>` : '';
+  const article = item.type !== 'youtube_video' && item.content && (!item.body || item.content.length > item.body.length + 400) ? item.content : '';
+  const articleHost = hostOf(item.link_url || item.url);
+  const linked = article ? `<section class="article"><div class="kicker">${c ? `From ${esc(articleHost)}` : 'Full text'}</div><div class="prose clamp-article">${prose(article)}</div>
+    ${article.length > 1800 ? '<button class="btn" data-act="expand-article">Continue reading</button>' : ''}</section>`
+    : hydrating && item.link_url ? `<p class="note">Fetching the article from ${esc(articleHost)}…</p>` : '';
   const why = item.why?.length ? `<div class="why"><div class="kicker">Why you're seeing this</div><ul>${item.why.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>` : '';
-  const coverage = story && story.story.sources.length > 1 ? `<section class="sec">${secHead(`Also covered by ${story.story.source_count - 1} more`)}${list(story.story.sources.filter(s => s.id !== item.id), {text: false})}</section>` : '';
+  const others = story ? story.story.sources.filter(x => x.id !== item.id) : [];
+  const coverage = others.length ? `<section class="sec">${secHead(`Also covered by ${others.length} more`)}${list(others, {text: false})}</section>` : '';
   const repo = r ? `<p class="note">${[r.stars != null && `★ ${compact(r.stars)} stars`, r.stars_delta_7d != null && `+${r.stars_delta_7d} this week`, r.license, r.language].filter(Boolean).map(esc).join(' · ')}</p>` : '';
-  const talk = c && ['reddit', 'hackernews'].includes(c.platform) ? `<section class="sec">${secHead(c.comments != null ? `Comments · ${compact(c.comments)}` : 'Comments', `<a href="#" data-act="refresh-comments" data-id="${item.id}">Refresh</a>`)}<div id="comments"><div class="sk" style="width:70%"></div><div class="sk" style="width:50%"></div></div></section>` : '';
+  const commentsBody = thread ? commentsHtml(thread, item) : error ? `<p class="note">Couldn't load comments (${esc(error)}).</p>` : '<div class="sk" style="width:70%"></div><div class="sk" style="width:50%"></div>';
+  const talk = c && ['reddit', 'hackernews'].includes(c.platform) ? `<section class="sec">${secHead(c.comments != null ? `Comments · ${compact(c.comments)}` : 'Comments', `<a href="#" data-act="refresh-comments" data-id="${item.id}">Refresh</a>`)}<div id="comments">${commentsBody}</div></section>` : '';
+  const y = scrollY;
   $('#main').innerHTML = `<article class="detail"><a class="back" href="javascript:history.back()">${icon('back')}Back</a>${metaLine(item, {author: true})}
-    <h1>${esc(r?.full_name && item.type === 'github_repository' ? r.full_name : item.title)}</h1>${repo}${buttons}${hero}${body}${linked}${why}</article>${coverage}${talk}`;
-  if (talk) loadComments(item.id, false);
+    <h1>${esc(r?.full_name && item.type === 'github_repository' ? r.full_name : item.title)}</h1>${repo}${buttons}${briefBox(item)}${hero}${body}${linked}${why}</article>${coverage}${talk}`;
+  if (keepScroll) scrollTo(0, y);
+}
+async function summarize(btn) {
+  const id = Number(btn.dataset.id), item = state.items.get(id) || {id};
+  const note = $('#brief-note');
+  if (note) note.textContent = 'Summarizing with your local model…';
+  btn.setAttribute('aria-busy', 'true');
+  try {
+    const r = await post(`/items/${id}/brief${btn.dataset.refresh ? '?refresh=true' : ''}`);
+    state.briefs.set(id, r.brief);
+    $('#brief').outerHTML = briefBox(item);
+  } catch (err) { if ($('#brief-note')) $('#brief-note').textContent = err.message; else toast(err.message); }
 }
 // Comments arrive compact: three top-level comments clamped to three lines, replies folded.
 const COMPACT_TOP = 3;
@@ -350,17 +415,21 @@ function commentHtml(node) {
     ${long || replies ? `<div class="cmt-actions">${long ? '<button data-act="expand-comment">Read more</button>' : ''}${replies ? `<button data-act="toggle-replies">▸ ${plural(replies, 'reply', 'replies')}</button>` : ''}</div>` : ''}
     ${replies ? `<div class="replies" hidden>${node.children.map(commentHtml).join('')}</div>` : ''}</div>`;
 }
+function commentsHtml(t, item) {
+  if (!t.comments.length) return `<p class="note">${t.error ? `Couldn't load comments (${esc(t.error)}).` : 'No comments yet.'}</p>`;
+  const roots = commentTree(t.comments);
+  const shown = roots.slice(0, COMPACT_TOP), rest = roots.slice(COMPACT_TOP);
+  const total = item?.community?.comments;
+  return `<div class="comments">${shown.map(commentHtml).join('')}${rest.length ? `<div class="more-comments" hidden>${rest.map(commentHtml).join('')}</div>` : ''}</div>
+    ${rest.length ? `<button class="show-all" data-act="all-comments">Show ${plural(rest.length, 'more comment')}</button>` : ''}
+    <p class="note">${total && total > t.comments.length ? `Showing ${t.comments.length} of ${compact(total)}. <a class="link" href="${esc(item ? discussionUrl(item) : '#')}" target="_blank" rel="noopener">All comments on ${item?.community?.platform === 'hackernews' ? 'Hacker News' : 'Reddit'} ↗</a>` : ''}</p>`;
+}
 async function loadComments(id, refresh) {
   const box = $('#comments'); if (!box) return;
+  box.innerHTML = '<div class="sk" style="width:70%"></div><div class="sk" style="width:50%"></div>';
   try {
     const t = await api(`/items/${id}/comments${refresh ? '?refresh=true' : ''}`);
-    if (!t.comments.length) { box.innerHTML = `<p class="note">${t.error ? `Couldn't load comments (${esc(t.error)}).` : 'No comments yet.'}</p>`; return; }
-    const roots = commentTree(t.comments), item = state.items.get(Number(id));
-    const shown = roots.slice(0, COMPACT_TOP), rest = roots.slice(COMPACT_TOP);
-    const total = item?.community?.comments;
-    box.innerHTML = `<div class="comments">${shown.map(commentHtml).join('')}${rest.length ? `<div class="more-comments" hidden>${rest.map(commentHtml).join('')}</div>` : ''}</div>
-      ${rest.length ? `<button class="show-all" data-act="all-comments">Show ${plural(rest.length, 'more comment')}</button>` : ''}
-      <p class="note">${total && total > t.comments.length ? `Showing ${t.comments.length} of ${compact(total)}. <a class="link" href="${esc(item ? discussionUrl(item) : '#')}" target="_blank" rel="noopener">All comments on ${item?.community?.platform === 'hackernews' ? 'Hacker News' : 'Reddit'} ↗</a>` : ''}</p>`;
+    box.innerHTML = commentsHtml(t, state.items.get(Number(id)));
   } catch (err) { box.innerHTML = `<p class="note">Couldn't load comments (${esc(err.message)}).</p>`; }
 }
 
@@ -391,11 +460,62 @@ async function listMode(mode) {
   $('#main').innerHTML = head(saved ? 'Saved' : 'History', saved ? 'Posts you kept for later, including ones saved on Reddit.' : 'Everything you opened.') +
     (data.items.length ? list(data.items) : empty(saved ? 'Nothing saved yet' : 'Nothing opened yet', `<p class="note">${saved ? `Use ${icon('save')} on any post.` : 'Open a post to see it here.'}</p>`));
 }
+const SEARCH_TABS = [['radar', 'In Radar'], ['reddit', 'Reddit'], ['hackernews', 'Hacker News']];
+const SEARCH_PERIODS = [['week', 'Past week'], ['month', 'Past month'], ['year', 'Past year'], ['all', 'All time']];
 async function search(query) {
   loading();
-  const d = await api(`/search?q=${encodeURIComponent(query)}`);
   $('#search').value = query;
-  $('#main').innerHTML = head(`“${query}”`, `${plural(d.count, 'result')}`) + (d.results.length ? list(d.results) : empty('No matches', '<p class="note">Try fewer or broader words.</p>'));
+  const tab = state.searchTab || 'radar', period = store.get('radar-search-period', 'year');
+  const tabs = `<div class="sorts">${SEARCH_TABS.map(([k, l]) => `<button class="${tab === k ? 'active' : ''}" data-act="search-tab" data-tab="${k}">${l}</button>`).join('')}
+    ${tab === 'reddit' ? `<select data-act="search-period" aria-label="Time range">${SEARCH_PERIODS.map(([k, l]) => `<option value="${k}" ${period === k ? 'selected' : ''}>${l}</option>`).join('')}</select>` : ''}</div>`;
+  let body, count;
+  if (tab === 'radar') {
+    const d = await api(`/search?q=${encodeURIComponent(query)}`);
+    count = d.count;
+    body = d.results.length ? list(d.results) : empty('Nothing collected matches', '<p class="note">Try the Reddit or Hacker News tab to search beyond your sources.</p>');
+  } else {
+    try {
+      const d = await api(`/search/live?q=${encodeURIComponent(query)}&where=${tab}${tab === 'reddit' ? `&period=${period}` : ''}`);
+      count = d.items.length;
+      body = d.items.length ? list(d.items) : empty('No results');
+    } catch (err) { count = 0; body = empty('Search failed', `<p class="note">${esc(err.message)}</p>`); }
+  }
+  $('#main').innerHTML = head(`“${query}”`, tab === 'radar' ? `${plural(count, 'result')} in what Radar has collected` : `${plural(count, 'result')} from ${tab === 'reddit' ? 'Reddit' : 'Hacker News'} — open any to read it here`) + tabs + body;
+}
+
+// ---------------------------------------------------------------- Videos & Discover
+async function videos(sourceId) {
+  loading();
+  const sort = store.get('radar-videos-sort', 'newest'), period = store.get('radar-videos-period', '7d');
+  const q = `/items?content_type=youtube_video&sort=${sort === 'best' ? 'score' : 'newest'}&period=${period}&limit=24${sourceId ? `&source_id=${sourceId}` : ''}`;
+  const [data, src] = await Promise.all([api(q), api('/sources').catch(() => ({sources: []}))]);
+  const channels = src.sources.filter(x => x.kind === 'youtube' && x.status !== 'muted');
+  state.feed = {q, offset: data.items.length, done: data.items.length < 24, size: 24, opts: {text: false}};
+  const chips = `<div class="chips"><a class="chip ${!sourceId ? 'active' : ''}" href="#/videos" data-fresh="1">All</a>${channels.map(ch => `<a class="chip ${String(ch.id) === String(sourceId) ? 'active' : ''}" href="#/videos/${ch.id}" data-fresh="1">${esc(ch.name.replace(/^YouTube · /, ''))}</a>`).join('')}<a class="chip" href="#/discover" data-fresh="1">+ Add channels</a></div>`;
+  const sorts = `<div class="sorts">${[['newest', 'Newest'], ['best', 'For you']].map(([k, l]) => `<button class="${sort === k ? 'active' : ''}" data-act="videos-sort" data-sort="${k}">${l}</button>`).join('')}
+    <select data-act="videos-period" aria-label="Time range">${PERIODS.map(([k, l]) => `<option value="${k}" ${period === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
+  $('#main').innerHTML = head('Videos', 'Tech news and explainers from YouTube — watch them right here.') + chips + sorts +
+    `<div id="feed">${data.items.length ? list(data.items, {text: false}) : empty('No videos in this range', '<p class="note">Add channels in Discover, or try a longer range.</p>')}</div><div class="more-btn">${state.feed.done ? '' : '<button class="btn" data-act="more">Show more</button>'}</div>`;
+  observeMore();
+}
+const KIND_LABEL = {reddit: 'Reddit', youtube: 'YouTube', rss: 'Web'};
+async function discover() {
+  loading();
+  const d = await api('/catalog');
+  const groups = d.groups.map(g => `<section class="sec">${secHead(g.topic)}<div class="lines">${g.items.map(x => `<div class="line"><span class="kind k-${x.kind}">${KIND_LABEL[x.kind]}</span><span class="name"><b>${esc(x.name)}</b> <small>${esc(x.note)}</small></span>
+      <button class="btn ${x.following ? 'on' : ''}" data-act="follow" data-kind="${x.kind}" data-identifier="${esc(x.identifier)}" data-name="${esc(x.source_name)}" data-source="${x.source_id || ''}" data-following="${x.following ? 1 : ''}">${x.following ? 'Following' : 'Follow'}</button></div>`).join('')}</div></section>`).join('');
+  $('#main').innerHTML = head('Discover sources', 'Follow subreddits, YouTube channels and sites. New sources start collecting within a few minutes.') + groups;
+}
+async function follow(btn) {
+  const {kind, identifier, name, source, following} = btn.dataset;
+  btn.disabled = true;
+  try {
+    if (following) { await api(`/sources/${source}`, {method: 'PATCH', body: JSON.stringify({status: 'muted'})}); btn.dataset.following = ''; btn.classList.remove('on'); btn.textContent = 'Follow'; }
+    else if (source) { await api(`/sources/${source}`, {method: 'PATCH', body: JSON.stringify({status: 'active'})}); btn.dataset.following = '1'; btn.classList.add('on'); btn.textContent = 'Following'; }
+    else { const r = await post('/sources', {kind, identifier, name}); btn.dataset.source = r.source_id; btn.dataset.following = '1'; btn.classList.add('on'); btn.textContent = 'Following'; }
+    state.cache.clear();
+  } catch (err) { toast(err.message); }
+  btn.disabled = false;
 }
 
 // ---------------------------------------------------------------- settings & sources
@@ -516,6 +636,12 @@ document.addEventListener('click', e => {
   else if (act === 'source-status') api(`/sources/${el.dataset.id}`, {method: 'PATCH', body: JSON.stringify({status: el.dataset.status})}).then(() => { toast('Updated'); state.fresh = true; route(); }).catch(err => toast(err.message));
   else if (act === 'refresh-comments') { e.preventDefault(); loadComments(el.dataset.id, true); }
   else if (act === 'zoom') openLightbox(el.dataset.src);
+  else if (act === 'brief') { e.preventDefault(); summarize(el); }
+  else if (act === 'play') el.outerHTML = `<div class="yt"><iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(el.dataset.vid)}?autoplay=1&rel=0" title="Video" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe></div>`;
+  else if (act === 'expand-article') { $('.clamp-article')?.classList.add('open'); el.remove(); }
+  else if (act === 'search-tab') { state.searchTab = el.dataset.tab; search(decodeURIComponent(location.hash.replace(/^#\/search\//, ''))); }
+  else if (act === 'videos-sort') { store.set('radar-videos-sort', el.dataset.sort); state.fresh = true; route(); }
+  else if (act === 'follow') follow(el);
   else if (act === 'expand-comment') { const c = el.closest('.cmt'); const t = $('.cmt-text', c); t.classList.remove('clamp'); t.removeAttribute('data-act'); $('.cmt-actions [data-act="expand-comment"]', c)?.remove(); }
   else if (act === 'toggle-replies') { const r = el.closest('.cmt').querySelector(':scope > .replies'); r.hidden = !r.hidden; el.textContent = el.textContent.replace(/^[▸▾]/, r.hidden ? '▸' : '▾'); }
   else if (act === 'all-comments') { $('.more-comments').hidden = false; el.remove(); }
@@ -525,6 +651,8 @@ document.addEventListener('click', e => {
 document.addEventListener('change', e => {
   const el = e.target;
   if (el.dataset?.act === 'period') { store.set(`radar-${el.dataset.platform}-period`, el.value); state.fresh = true; route(); }
+  if (el.dataset?.act === 'videos-period') { store.set('radar-videos-period', el.value); state.fresh = true; route(); }
+  if (el.dataset?.act === 'search-period') { store.set('radar-search-period', el.value); search(decodeURIComponent(location.hash.replace(/^#\/search\//, ''))); }
   if (el.name === 'kind' && el.form?.dataset.act === 'add-source') el.form.identifier.placeholder = KINDS.find(k => k[0] === el.value)?.[2] || '';
 });
 document.addEventListener('input', e => { if (e.target.dataset?.act === 'mix') onMix(e.target); });
@@ -536,6 +664,10 @@ document.addEventListener('submit', e => {
   if (form.dataset.act === 'add-source') post('/sources', {kind: form.kind.value, identifier: form.identifier.value}).then(() => { toast('Source added'); sources(); }).catch(err => toast(err.message));
 });
 document.addEventListener('click', e => { const menu = $('.menu'); if (menu?.open && !e.target.closest('.menu')) menu.removeAttribute('open'); });
+
+// Inline post images keep placeholder height until loaded (so lazy loading triggers), and vanish if gone.
+document.addEventListener('load', e => { if (e.target.matches?.('.inline-img img')) e.target.closest('figure').classList.add('loaded'); }, true);
+document.addEventListener('error', e => { if (e.target.matches?.('.inline-img img')) e.target.closest('figure').classList.add('failed'); }, true);
 
 // ---------------------------------------------------------------- lightbox & keyboard
 function openLightbox(src) {
@@ -580,7 +712,7 @@ document.addEventListener('keydown', e => {
 });
 
 // ---------------------------------------------------------------- routing (Back restores list pages and scroll)
-const CACHEABLE = new Set(['today', 'reddit', 'hn', 'explore', 'projects', 'saved', 'history', 'search']);
+const CACHEABLE = new Set(['today', 'reddit', 'hn', 'videos', 'explore', 'projects', 'saved', 'history', 'search']);
 let currentHash = null;
 async function route() {
   const hash = location.hash || '#/today';
@@ -602,6 +734,8 @@ async function route() {
     else if (page === 'reddit') await communityPage('reddit', arg || null);
     else if (page === 'hn') await communityPage('hackernews', null);
     else if (page === 'tune') await tune();
+    else if (page === 'videos') await videos(arg || null);
+    else if (page === 'discover') await discover();
     else if (page === 'explore') await explore();
     else if (page === 'projects') await projects();
     else if (page === 'saved' || page === 'history') await listMode(page);
@@ -616,7 +750,7 @@ async function route() {
   }
   if (prev !== hash) scrollTo(0, 0);
 }
-$('#search').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.value.trim()) { state.fresh = true; location.hash = `#/search/${encodeURIComponent(e.target.value.trim())}`; e.target.blur(); } });
+$('#search').addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.value.trim()) { state.fresh = true; state.searchTab = 'radar'; location.hash = `#/search/${encodeURIComponent(e.target.value.trim())}`; e.target.blur(); } });
 $('#search-toggle').addEventListener('click', () => { $('.top').classList.toggle('searching'); $('#search').focus(); });
 document.addEventListener('keydown', e => { if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName)) { e.preventDefault(); $('.top').classList.add('searching'); $('#search').focus(); } });
 $('#theme').onclick = () => { const light = document.documentElement.classList.toggle('light'); store.set('radar-theme', light ? 'light' : 'dark'); };

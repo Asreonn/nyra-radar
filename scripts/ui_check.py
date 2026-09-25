@@ -41,7 +41,14 @@ async def check_size(ws, width: int, height: int, call_id: int, route: str) -> t
     call_id += 1
     await command(ws, call_id, "Page.navigate", {"url": f"http://127.0.0.1:47400/#/{route}"})
     call_id += 1
-    await asyncio.sleep(2.5)
+    for _ in range(60):  # wait for rendered entries (Today re-ranks before answering), up to ~15 s
+        ready = await command(ws, call_id, "Runtime.evaluate",
+                              {"expression": "!!document.querySelector('#main .entry')", "returnByValue": True})
+        call_id += 1
+        if ready.get("result", {}).get("value"):
+            break
+        await asyncio.sleep(0.25)
+    await asyncio.sleep(0.5)
     expression = """JSON.stringify({
       route:location.hash, viewport:[innerWidth,innerHeight], scrollWidth:document.documentElement.scrollWidth,
       overflow:document.documentElement.scrollWidth>innerWidth,
@@ -85,7 +92,7 @@ async def main() -> None:
                     result, call_id = await check_size(ws, width, height, call_id, route)
                     results.append(result)
         print(json.dumps(results, indent=2))
-        if any(x["overflow"] or not x["title"] or x["cards"] < 1 or x["redditCards"] < 1 for x in results):
+        if any(x["overflow"] or not x.get("title") or x["cards"] < 1 or x["redditCards"] < 1 for x in results):
             raise SystemExit(1)
         if any(x["viewport"][0] < 800 and x["minCoreControl"] < 40 for x in results):
             raise SystemExit(1)

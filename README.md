@@ -4,7 +4,13 @@ Nyra Radar is a self-hosted personal technology intelligence radar and open-sour
 
 It is deliberately not an RSS inbox: the main unit is a ranked story or project signal, while the complete unranked collection remains manually browsable. Reddit is the primary community source: Today opens with the best threads from your subreddits, and a dedicated Reddit view lets you browse them like Reddit itself (hot/top/new/discussed, per subreddit, with the discussion thread inline). Hacker News follows as its own section and view. The UI is a single, quiet reading column in Nyra's palette (dark first, purple accent — taken from the Nyra app's `src/index.css`).
 
-Reading: Reddit image, gallery and video posts show their picture large in the feed (Atom thumbnails are upgraded to the original `i.redd.it` upload); opening a post shows the complete Reddit text and a compact discussion — three top-level comments clamped to three lines, replies folded, "Show more" for the rest. Images open in a lightbox, lists continue loading as you scroll, opened posts are dimmed and posts new since your last visit get a dot. Keyboard: `j`/`k` move, `o` opens, `l` more like this, `d` less like this, `s` save, `x` hide, `/` search, `?` help.
+Reading inside Radar: opening a post completes it on the spot (`POST /api/v1/items/{id}/hydrate`) — the thread feed's full copy of a Reddit post with its inline images in place, the linked article extracted and shown inline, the picture cached, and the comments. Images referenced inside posts and comments are fetched once through `/media/remote` (allow-listed hosts only) and served from the local cache. ✦ **Summarize** asks your local model (Ollama) for a TL;DR of the post and of what the discussion says; it runs only when the hardware gate allows it and is cached per item.
+
+Sources beyond Reddit/HN: eight tech YouTube channels are followed by default (Fireship, TechLinked, AI Explained, Matt Wolfe, Two Minute Papers, The PrimeTime, The Linux Experiment, Level1Techs; Shorts skipped) and appear in **Videos** with click-to-play (youtube-nocookie, loaded only when you press play). **Discover** (`#/discover`, `GET /api/v1/catalog`) offers ~70 curated subreddits, channels and feeds by topic — AI, programming, Linux, hardware, security, tech news, Turkish tech news, explainers — to follow with one click; every channel id and feed URL was verified live. `POST /api/v1/sources` also accepts a YouTube `@handle` or channel URL.
+
+Search: the header search looks in everything Radar has collected, and its **Reddit** / **Hacker News** tabs search those sites live (`GET /api/v1/search/live`); live results open in the reader but stay out of your ranked feeds. Today ends with an endless **Keep reading** list (`GET /api/v1/feed`).
+
+Reddit image, gallery and video posts show their picture large in the feed (Atom thumbnails are upgraded to the original `i.redd.it` upload); opening a post shows the complete Reddit text and a compact discussion — three top-level comments clamped to three lines, replies folded, "Show more" for the rest. Images open in a lightbox, lists continue loading as you scroll, opened posts are dimmed and posts new since your last visit get a dot. Keyboard: `j`/`k` move, `o` opens, `l` more like this, `d` less like this, `s` save, `x` hide, `/` search, `?` help.
 
 ## Current installation
 
@@ -119,6 +125,8 @@ The default bind is loopback-only. Non-loopback requests require the generated b
 ## Known limitations
 
 - Reddit redirects anonymous JSON (and old.reddit RSS) to login on this network; collection therefore runs on the `www.reddit.com` Atom feeds, which have no vote/comment counts and rate-limit bursts (429). OAuth credentials restore vote counts.
+- Reddit's anonymous feeds show only the first image of a gallery and no vote counts; posts are completed from the thread feed when opened.
+- Summaries need a local model (Ollama); without one the button explains why.
 - Account connect relies on Reddit's private feed tokens for the upvoted/saved listings; a wrong token is visible as a 403 on those feeds in the account card.
 - Telegram supports public web channels only; private channels require credentials and are disabled.
 - GitHub GraphQL-only enrichment uses the existing `gh` token; anonymous REST falls back to its lower limit.
