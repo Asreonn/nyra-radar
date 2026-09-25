@@ -239,3 +239,15 @@ def test_account_connect_signals_and_taste_profile(db):
 def test_html_to_text_keeps_structure():
     text = html_to_text("<p>Hello &amp; welcome</p><p>Second<br>line</p><ul><li>a</li><li>b</li></ul>")
     assert text == "Hello & welcome\n\nSecond\nline\n\n• a\n• b"
+
+
+def test_feed_token_survives_extra_params_and_is_redacted_in_logs():
+    import logging
+    from radar.cli import _redact_log_record
+    from radar.net import merge_query
+    url, params = merge_query("https://www.reddit.com/user/a/saved/.rss?feed=SECRETTOKEN&user=a", {"limit": 100})
+    assert params is None and "feed=SECRETTOKEN" in url and "user=a" in url and "limit=100" in url
+    assert merge_query("https://www.reddit.com/r/rust/hot/.rss", {"limit": 5}) == ("https://www.reddit.com/r/rust/hot/.rss", {"limit": 5})
+    record = logging.LogRecord("httpx", logging.INFO, "", 0, "HTTP Request: GET %s", (url,), None)
+    _redact_log_record(record)
+    assert "SECRETTOKEN" not in record.getMessage()

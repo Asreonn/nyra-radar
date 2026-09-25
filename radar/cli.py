@@ -56,6 +56,15 @@ def doctor() -> dict:
             "resources": state.__dict__, "server": f"http://{config.server.host}:{config.server.port}"}
 
 
+def _redact_log_record(record: logging.LogRecord) -> bool:
+    """Private Reddit feed tokens must never reach the journal (httpx logs every request URL)."""
+    message = record.getMessage()
+    if "feed=" in message:
+        from radar.util import redact_feed_tokens
+        record.msg, record.args = redact_feed_tokens(message), None
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="radar", description="Nyra Radar local intelligence service")
     parser.add_argument("--verbose", action="store_true")
@@ -72,6 +81,8 @@ def main() -> None:
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(_redact_log_record)
     if args.command == "init":
         print(json.dumps(bootstrap(), indent=2))
     elif args.command == "doctor":

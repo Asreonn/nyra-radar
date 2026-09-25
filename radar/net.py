@@ -7,7 +7,7 @@ import random
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 
@@ -128,6 +128,9 @@ class Http:
         timeout: float | None = None,
         accept_statuses: tuple[int, ...] = (200,),
     ) -> Response:
+        # httpx replaces a URL's query string with `params` instead of merging them; that silently
+        # dropped the private ?feed=…&user=… token from Reddit account feeds.
+        url, params = merge_query(url, params)
         host = urlsplit(url).hostname or ""
         attempt = 0
         while True:
@@ -177,3 +180,13 @@ def _retry_after(value: str | None) -> float | None:
         return float(value)
     except ValueError:
         return None
+
+
+def merge_query(url: str, params: dict[str, Any] | None) -> tuple[str, dict[str, Any] | None]:
+    """Fold `params` into a URL that already carries a query string (params win on conflicts)."""
+    parts = urlsplit(url)
+    if not params or not parts.query:
+        return url, params
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.update({k: str(v) for k, v in params.items() if v is not None})
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment)), None
