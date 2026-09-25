@@ -6,6 +6,7 @@ import time
 from datetime import timedelta
 
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from radar.collectors import COLLECTORS, CollectorError, MissingCredentials, SourceSpec
@@ -45,13 +46,21 @@ DEFAULT_SOURCES = (
 
 
 def ensure_default_sources(session: Session) -> int:
+    """Seed missing default sources. The API and the worker both run this at boot, so an insert
+    can race with the other process: each one runs in a savepoint and a unique-constraint hit
+    means the other process already seeded that source."""
     count = 0
     for kind, name, identifier, url, config in DEFAULT_SOURCES:
         exists = session.scalar(select(Source).where(Source.kind == kind, Source.identifier == identifier))
-        if exists is None:
-            session.add(Source(kind=kind, name=name, identifier=identifier, url=url, config=config,
-                               status="active", origin="seed"))
+        if exists is not None:
+            continue
+        try:
+            with session.begin_nested():
+                session.add(Source(kind=kind, name=name, identifier=identifier, url=url, config=config,
+                                   status="active", origin="seed"))
             count += 1
+        except IntegrityError:
+            pass
     return count
 
 
