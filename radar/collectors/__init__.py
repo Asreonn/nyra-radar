@@ -1,7 +1,14 @@
 """Collector registry: Source.kind -> Collector class."""
 from __future__ import annotations
 
-from radar.collectors.base import Collector, CollectorError, FetchResult, MissingCredentials, SourceSpec
+from radar.collectors.base import (
+    Collector,
+    CollectorError,
+    Deferred,
+    FetchResult,
+    MissingCredentials,
+    SourceSpec,
+)
 from radar.collectors.github import (
                                      GitHubOrgCollector,
                                      GitHubSearchCollector,
@@ -24,4 +31,5 @@ COLLECTORS: dict[str, type[Collector]] = {
               GoogleNewsCollector, YouTubeCollector, WebsiteWatchCollector, TelegramCollector)
 }
 
-__all__ = ["COLLECTORS", "Collector", "CollectorError", "FetchResult", "MissingCredentials", "SourceSpec"]
+__all__ = ["COLLECTORS", "Collector", "CollectorError", "Deferred", "FetchResult", "MissingCredentials",
+           "SourceSpec"]

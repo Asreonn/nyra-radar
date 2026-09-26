@@ -4,7 +4,7 @@ Nyra Radar is a self-hosted personal technology intelligence radar and open-sour
 
 It is deliberately not an RSS inbox: the main unit is a ranked story or project signal, while the complete unranked collection remains manually browsable. Reddit is the primary community source: Today opens with the best threads from your subreddits, and a dedicated Reddit view lets you browse them like Reddit itself (hot/top/new/discussed, per subreddit, with the discussion thread inline). Hacker News follows as its own section and view. The UI is a single, quiet reading column in Nyra's palette (dark first, purple accent — taken from the Nyra app's `src/index.css`).
 
-Reading inside Radar: opening a post completes it on the spot (`POST /api/v1/items/{id}/hydrate`) — the thread feed's full copy of a Reddit post with its inline images in place, the linked article extracted and shown inline, the picture cached, and the comments. Images referenced inside posts and comments are fetched once through `/media/remote` (allow-listed hosts only) and served from the local cache. ✦ **Summarize** asks your local model (Ollama) for a TL;DR of the post and of what the discussion says; it runs only when the hardware gate allows it and is cached per item.
+Reading inside Radar never waits: a post opens with what the list already showed, then fills in section by section — the thread feed's full copy of a Reddit post with its inline images in place, the linked article (`POST /api/v1/items/{id}/hydrate`) and the comments (`GET /api/v1/items/{id}/comments`, stored copy first, then refreshed when stale). Photos, video covers and link previews appear while you scroll: a picture the worker has not cached yet is fetched on first view through `/media/item/{id}`. Videos play in place — YouTube videos (including YouTube links posted to Reddit) through the privacy-enhanced embed, Reddit-hosted videos straight from v.redd.it (HLS where the browser has it, otherwise the DASH video and audio files kept in sync). Images referenced inside posts and comments are fetched once through `/media/remote` (allow-listed hosts only) and served from the local cache. Open pages show a "↑ N new posts" button when the worker brings in more (`GET /api/v1/updates`). ✦ **Summarize** asks your local model (Ollama) for a TL;DR of the post and of what the discussion says; it runs only when the hardware gate allows it and is cached per item.
 
 Sources beyond Reddit/HN: eight tech YouTube channels are followed by default (Fireship, TechLinked, AI Explained, Matt Wolfe, Two Minute Papers, The PrimeTime, The Linux Experiment, Level1Techs; Shorts skipped) and appear in **Videos** with click-to-play (youtube-nocookie, loaded only when you press play). **Discover** (`#/discover`, `GET /api/v1/catalog`) offers ~70 curated subreddits, channels and feeds by topic — AI, programming, Linux, hardware, security, tech news, Turkish tech news, explainers — to follow with one click; every channel id and feed URL was verified live. `POST /api/v1/sources` also accepts a YouTube `@handle` or channel URL.
 
@@ -89,6 +89,8 @@ Subreddits are added from the Reddit view (names, `r/name`, links or `a+b` multi
 
 The link is a read-only token. It is stored only in the source identifiers and redacted in every API response and stored error; *Disconnect* deletes it (learned interests stay).
 
+**Rate limits.** Anonymous Reddit access has a small per-IP budget. When Reddit answers 429, Radar starts a cooldown shared by the API and the worker (a timestamp in the runtime directory, as long as Reddit's `x-ratelimit-reset` asks): no Reddit request goes out meanwhile, subreddit collection is deferred rather than counted as a failure, the reader keeps showing the stored comments and retries by itself when the pause ends, and comment prefetching steps aside for two minutes whenever you open posts yourself.
+
 GitHub projects have separate metadata, snapshots, locally measured star growth, cross-community mentions, README content, release/activity fields, license and hydration state. Unknown values remain null; no growth metric is fabricated.
 
 ## Nyra tool API
@@ -106,7 +108,7 @@ related = radar.radar_related(results["results"][0]["id"])
 feedback = radar.radar_feedback(results["results"][0]["id"], "like")
 ```
 
-Stable REST endpoints are versioned under `/api/v1`. Reddit-specific additions: `GET /communities` (subreddits with counts and collection health), `GET /community?platform=reddit|hackernews&community=…&sort=hot|top|new|discussed|best&period=3d`, `GET /items/{id}/comments`, and `GET|POST|DELETE /reddit/account` plus `POST /reddit/account/sync`. The next Nyra voice integration point is `core/src/tools.ts`: register the five methods above and dispatch them to `http://127.0.0.1:47400/api/v1/...`. Keep Radar a separate service; do not import its database into Nyra.
+Stable REST endpoints are versioned under `/api/v1`. Reddit-specific additions: `GET /communities` (subreddits with counts and collection health), `GET /community?platform=reddit|hackernews&community=…&sort=hot|top|new|discussed|best&period=3d`, `GET /items/{id}/comments` (`?cached=true` answers from the stored copy only; rate limits come back as `retry_in` seconds), `GET /updates?since=…&scope=today|reddit|hn|videos`, `GET /media/item/{id}` (the item's picture, cached on first request), and `GET|POST|DELETE /reddit/account` plus `POST /reddit/account/sync`. The next Nyra voice integration point is `core/src/tools.ts`: register the five methods above and dispatch them to `http://127.0.0.1:47400/api/v1/...`. Keep Radar a separate service; do not import its database into Nyra.
 
 ## Test and verification
 
@@ -126,6 +128,7 @@ The default bind is loopback-only. Non-loopback requests require the generated b
 
 - Reddit redirects anonymous JSON (and old.reddit RSS) to login on this network; collection therefore runs on the `www.reddit.com` Atom feeds, which have no vote/comment counts and rate-limit bursts (429). OAuth credentials restore vote counts.
 - Reddit's anonymous feeds show only the first image of a gallery and no vote counts; posts are completed from the thread feed when opened.
+- Reddit-hosted videos are H.264: they play in Chrome, Edge, Safari and Firefox (with system codecs), not in open-source Chromium builds without proprietary codecs, where the reader links to Reddit instead. YouTube watch pages are script-rendered, so a YouTube link has no extracted description; the video itself is embedded.
 - Summaries need a local model (Ollama); without one the button explains why.
 - Account connect relies on Reddit's private feed tokens for the upvoted/saved listings; a wrong token is visible as a 403 on those feeds in the account card.
 - Telegram supports public web channels only; private channels require credentials and are disabled.

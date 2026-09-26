@@ -18,3 +18,13 @@ Reddit is the primary community source. Engagement is normalised per subreddit (
 A Reddit account can be connected without a password through its private feed token (reddit.com/prefs/feeds): the front page follows the user's subscriptions, and the upvoted/saved listings become `like`/`save` events. Posts that only arrived because the user already reacted to them on Reddit are kept out of the feeds. The token lives only in source identifiers and is redacted in every API response and stored error.
 
 The browser UI (`apps/web/dist`) is dependency-free HTML/CSS/ES modules served as static files; there is no build step.
+
+## Responsiveness rules
+
+The API and the worker share one SQLite file, and the API serves async endpoints on a single event loop, so three rules keep the reader from waiting:
+
+- **Short write transactions.** Every endpoint that writes commits inside its own call (`@commits`), never later in the dependency teardown: a write transaction left open across a trip through the event loop can stall an async endpoint that is waiting on the loop for the write lock, and with it every request (observed: 6 s without responses while a post opened). The worker commits after every stage; a ranking pass computes all scores first and writes them in one flush (`rescore(background=True)`).
+- **Nothing heavy on the loop.** Article parsing runs in a thread; the full re-rank after feedback runs in a background thread, debounced, and the Today digest only scores unscored arrivals inline (a full pass took 2.3 s per page load before).
+- **Rate limits are shared state, not retries.** A Reddit 429 writes a cooldown stamp that both processes read; requests during the cooldown fail fast, collection defers (`Deferred`, no failure count), and the reader answers from the stored thread with `retry_in`. Interactive fetches use no retries and a 10 s timeout.
+
+Pictures and videos never wait for the worker: the serializer gives each item a `media` block (YouTube id, v.redd.it stream URLs, image/gallery) and an `image` that is either cached (with its size) or `/media/item/{id}` (downloaded on first view). YouTube-linked posts get the video's own cover candidates at ingest and skip page extraction.

@@ -8,7 +8,7 @@ from datetime import timedelta
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from radar.collectors import COLLECTORS, CollectorError, MissingCredentials, SourceSpec
+from radar.collectors import COLLECTORS, CollectorError, Deferred, MissingCredentials, SourceSpec
 from radar.config import Config
 from radar.db.models import FetchLog, Source
 from radar.net import Http
@@ -120,6 +120,10 @@ async def fetch_source(session: Session, source: Source, http: Http, config: Con
                              ok=True, status_code=result.status_code, items_seen=stats.seen,
                              items_new=stats.new, items_updated=stats.updated))
         return stats
+    except Deferred as exc:
+        source.total_fetches -= 1  # not an attempt that counts against the source
+        source.next_fetch_at = now + timedelta(seconds=exc.retry_after + 5)
+        return IngestStats()
     except MissingCredentials as exc:
         source.status = "disabled"
         source.last_error = str(exc)

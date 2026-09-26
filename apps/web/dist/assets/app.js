@@ -9,7 +9,7 @@ const store = {
   get(key, fallback) { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } },
   set(key, value) { try { localStorage.setItem(key, value); } catch { /* private mode */ } },
 };
-const state = { fresh: true, cache: new Map(), items: new Map(), stash: new Map(), timers: new Map(), opened: new Set(), briefs: new Map(), searchTab: 'radar' };
+const state = { fresh: true, cache: new Map(), items: new Map(), stash: new Map(), timers: new Map(), opened: new Set(), briefs: new Map(), audios: new Set(), posters: new Map(), searchTab: 'radar' };
 const suppliedToken = new URLSearchParams(location.search).get('token');
 if (suppliedToken) { store.set('radar-token', suppliedToken); history.replaceState(null, '', location.pathname + location.hash); }
 const authToken = store.get('radar-token', null);
@@ -126,25 +126,108 @@ function tuneActions(item) {
     <button class="btn" data-act="tune" data-vote="dislike" data-id="${item.id}">${icon('down')}Less like this</button>
     <button class="btn" data-act="tune" data-vote="skip" data-id="${item.id}">Not sure</button></div>`;
 }
-const MEDIA_BADGE = {gallery: 'Gallery', video: '▶ Video', youtube: '▶ YouTube'};
-// Reddit image, gallery and video posts show their picture large, like Reddit; everything else a thumbnail.
-const isMediaPost = item => item.image_url && (item.community?.kind === 'media' || item.type === 'youtube_video');
-function mediaBlock(item, href) {
-  const yt = item.type === 'youtube_video';
-  const w = yt ? 16 : item.image?.width, h = yt ? 9 : item.image?.height, tall = w && h && h / w > 1.25;
-  const ratio = w && h && !tall ? ` style="aspect-ratio:${w} / ${h}"` : '';
-  const badge = MEDIA_BADGE[item.type === 'youtube_video' ? 'youtube' : item.community?.media];
-  const backdrop = tall ? `<img class="backdrop" src="${esc(item.image_url)}" alt="" aria-hidden="true" loading="lazy">` : '';
-  return `<a class="media ${tall ? 'tall' : ''}" href="${href}"${ratio} aria-label="${esc(item.title)}">${backdrop}<img src="${esc(item.image_url)}" alt="" loading="lazy" decoding="async">${badge ? `<span class="badge">${badge}</span>` : ''}</a>`;
+// ---------------------------------------------------------------- media (pictures and videos)
+// Pictures show at once: cached ones come with their size, uncached ones load through
+// /media/item/<id> (fetched on first view) and are measured when they arrive. Videos play in place:
+// YouTube through its privacy-enhanced embed, Reddit videos straight from v.redd.it.
+const VIDEO_KINDS = new Set(['youtube', 'reddit_video']);
+const isVideo = item => VIDEO_KINDS.has(item.media?.kind);
+const MEDIA_BADGE = {gallery: 'Gallery', reddit_video: '▶ Video', youtube: '▶ YouTube'};
+// Shape of a picture's box: its own, but never taller than ~60% of the screen (80% in the reader)
+// nor wider than 2:1. Anything clamped is letterboxed instead of cropped.
+const clampRatio = (r, reader = false) => {
+  const col = Math.min(innerWidth - 32, 720), maxH = reader ? Math.min(760, innerHeight * 0.8) : Math.min(560, innerHeight * 0.6);
+  return Math.max(0.8, col / maxH, Math.min(2, r));
+};
+// Photos, galleries and videos are the point of the post: shown large. Articles get a large card
+// only when their picture is big enough to carry one; otherwise a thumbnail.
+function showsLarge(item) {
+  const w = item.image?.width;
+  if (isVideo(item) || item.type === 'youtube_video') return true;
+  if (!item.image_url) return false;
+  if (['image', 'gallery'].includes(item.media?.kind)) return !w || w >= 320;  // a tiny picture stays a thumbnail
+  return w >= 560;
 }
+function mediaHtml(item, {href = null, reader = false} = {}) {
+  const src = item.image_url, video = isVideo(item) || (item.type === 'youtube_video' && item.media);
+  if (!src && !video) return '';
+  const w = item.image?.width, h = item.image?.height;
+  const natural = video ? 16 / 9 : w && h ? w / h : null;
+  const ratio = natural ? clampRatio(natural, reader) : Math.max(4 / 3, clampRatio(1, reader));
+  const fit = !video && (!natural || Math.abs(natural - ratio) > 0.01);  // letterbox tall/wide or not yet measured
+  const pics = src ? `${fit ? `<img class="backdrop" src="${esc(src)}" alt="" aria-hidden="true" loading="lazy" decoding="async">` : ''}<img class="main" src="${esc(src)}" alt="" loading="lazy" decoding="async"${natural ? '' : ' data-measure="1"'}>` : '';
+  const badge = MEDIA_BADGE[item.media?.kind] ? `<span class="badge">${MEDIA_BADGE[item.media.kind]}</span>` : '';
+  const cls = `media${fit ? ' fit' : ''}${video ? ' video' : ''}${reader ? ' in-reader' : ''}`;
+  const style = `style="aspect-ratio:${ratio.toFixed(4)}"`;
+  if (video) return `<button class="${cls}" ${style} data-act="play" data-id="${item.id}" aria-label="Play video">${pics}<span class="play" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg></span>${badge}</button>`;
+  if (reader || !href) return `<div class="${cls}" ${style} data-act="zoom" data-src="${esc(src)}" title="Click to enlarge">${pics}${badge}</div>`;
+  return `<a class="${cls}" ${style} href="${href}" tabindex="-1" aria-label="${esc(item.title)}">${pics}${badge}</a>`;
+}
+// A picture of unknown size takes its real shape once it arrives (scroll anchoring keeps the page still).
+function measure(img) {
+  const box = img.closest('.media'); if (!box || !img.naturalWidth) return;
+  const natural = img.naturalWidth / img.naturalHeight, ratio = clampRatio(natural, box.classList.contains('in-reader'));
+  box.style.aspectRatio = ratio.toFixed(4);
+  if (Math.abs(natural - ratio) <= 0.01) { box.classList.remove('fit'); box.querySelector('.backdrop')?.remove(); }
+}
+const ytFrame = (vid, id) => `<div class="media video playing" style="aspect-ratio:1.7778" data-player="${id}"><iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(vid)}?autoplay=1&rel=0&playsinline=1" title="Video" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe></div>`;
+function stopPlayers(except) {
+  for (const v of $$('video')) if (v !== except) v.pause();
+  for (const a of state.audios) if (a !== except?._audio) a.pause();
+}
+async function play(el) {
+  const item = state.items.get(Number(el.dataset.id)), m = item?.media;
+  if (!m) return;
+  stopPlayers();
+  state.posters.set(String(item.id), el.outerHTML);  // put back when the page is cached for Back
+  if (m.kind === 'youtube') { el.outerHTML = ytFrame(m.id, item.id); return; }
+  const poster = item.image_url ? ` poster="${esc(item.image_url)}"` : '';
+  el.outerHTML = `<div class="media video playing" style="aspect-ratio:1.7778" data-player="${item.id}"><video controls playsinline preload="auto"${poster}></video></div>`;
+  const video = $(`[data-player="${item.id}"] video`);
+  const failed = () => { const box = video.closest('.media'); if (box && !box.nextElementSibling?.classList.contains('video-fail')) box.insertAdjacentHTML('afterend', `<p class="note video-fail">This browser can't play this video here. <a class="link" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">Watch on Reddit ↗</a></p>`); };
+  video.addEventListener('error', failed);
+  try { await redditVideo(video, m); } catch { failed(); }
+}
+// Reddit serves HLS (Safari, iOS, Android) and DASH as separate progressive video and audio files,
+// which any browser can play: the audio element follows the video element.
+async function redditVideo(video, m) {
+  if (!video.canPlayType('video/mp4; codecs="avc1.42E01E"') && !video.canPlayType('application/vnd.apple.mpegurl')) throw new Error('H.264 not supported');
+  video.addEventListener('play', () => stopPlayers(video));
+  if (video.canPlayType('application/vnd.apple.mpegurl')) { video.src = m.hls; return video.play().catch(() => {}); }
+  const res = await fetch(m.dash); if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const xml = new DOMParser().parseFromString(await res.text(), 'application/xml');
+  const base = m.dash.replace(/[^/]+$/, '');
+  const reps = kind => [...new Set(xml.querySelectorAll(`AdaptationSet[contentType="${kind}"] Representation, AdaptationSet[mimeType^="${kind}"] Representation, Representation[mimeType^="${kind}"]`))]
+    .map(r => ({url: new URL(r.querySelector('BaseURL')?.textContent.trim() || '', base).href, h: Number(r.getAttribute('height')) || 0, bw: Number(r.getAttribute('bandwidth')) || 0}))
+    .filter(r => !r.url.endsWith('/'));
+  const videos = reps('video').sort((a, b) => a.h - b.h);
+  if (!videos.length) throw new Error('no video stream');
+  const maxH = innerWidth * devicePixelRatio > 1400 ? 1080 : 720;
+  video.src = (videos.filter(v => v.h <= maxH).pop() || videos[0]).url;
+  const audio = reps('audio').sort((a, b) => a.bw - b.bw).pop();
+  if (audio) pairAudio(video, audio.url);
+  await video.play().catch(() => {});
+}
+function pairAudio(video, src) {
+  const audio = new Audio(src); audio.preload = 'auto';
+  video._audio = audio; state.audios.add(audio);
+  const sync = () => { if (Math.abs(audio.currentTime - video.currentTime) > 0.3) audio.currentTime = video.currentTime; };
+  const go = () => { sync(); if (!video.paused) audio.play().catch(() => {}); };
+  for (const ev of ['play', 'playing', 'seeked']) video.addEventListener(ev, go);
+  for (const ev of ['pause', 'waiting', 'ended', 'emptied']) video.addEventListener(ev, () => audio.pause());
+  video.addEventListener('timeupdate', sync);
+  video.addEventListener('ratechange', () => { audio.playbackRate = video.playbackRate; });
+  video.addEventListener('volumechange', () => { audio.volume = video.volume; audio.muted = video.muted; });
+}
+
 function entry(item, {tune = false, text = true, source = true} = {}) {
   state.items.set(item.id, item);
-  const big = isMediaPost(item);
+  const big = showsLarge(item);
   const blurb = text ? describe(item) : '';
   const href = item.repository?.id && item.type === 'github_repository' ? `#/project/${item.repository.id}` : `#/item/${item.id}`;
   const title = item.repository?.full_name && item.type === 'github_repository' ? item.repository.full_name : item.title;
   return `<article class="entry ${item.user?.read ? 'read' : ''}" data-item="${item.id}"><div style="min-width:0">${metaLine(item, {source})}
-    <h3><a href="${href}">${esc(title)}</a></h3>${big ? mediaBlock(item, href) : ''}${blurb ? `<p>${esc(blurb)}</p>` : ''}${tune ? tuneActions(item) : actions(item)}</div>
+    <h3><a href="${href}">${esc(title)}</a></h3>${big ? mediaHtml(item, {href}) : ''}${blurb ? `<p>${esc(blurb)}</p>` : ''}${tune ? tuneActions(item) : actions(item)}</div>
     ${item.image_url && !big ? `<a class="thumb" href="${href}" tabindex="-1" aria-hidden="true"><img src="${esc(item.image_url)}" alt="" loading="lazy" decoding="async"></a>` : ''}</article>`;
 }
 const list = (items, opts) => `<div class="list">${items.map(i => entry(i, opts)).join('')}</div>`;
@@ -318,24 +401,90 @@ async function tuneUndo(btn) {
 }
 
 // ---------------------------------------------------------------- detail
+// The reader never waits: it renders what the list already knew, then the stored post, then fills
+// in the thread's full text, the linked article and fresh comments as each arrives — section by
+// section, so a video that is already playing keeps playing.
 async function detail(id, isProject = false) {
-  loading();
+  const here = location.hash, known = !isProject && state.items.get(Number(id));
+  if (known) renderDetail(known, null, {hydrating: true}); else loading();
   const d = await api(isProject ? `/projects/${id}` : `/items/${id}`);
+  if (location.hash !== here) return;
   const item = d.project || d.item;
   state.items.set(item.id, item);
+  state.detail = {item, story: null, hydrating: true, html: {}};
   if (!state.opened.has(item.id)) { state.opened.add(item.id); feedback(item.id, 'open').catch(() => {}); }
-  const story = item.cluster_id ? await api(`/stories/${item.cluster_id}`).catch(() => null) : null;
-  renderDetail(item, story, null, {hydrating: true});
-  const here = location.hash;
+  if (known) updateDetail(item); else renderDetail(item, null, {hydrating: true});
+  if (item.cluster_id) api(`/stories/${item.cluster_id}`).then(story => { if (location.hash === here) { state.detail.story = story; $('#d-also').innerHTML = alsoHtml(item, story); } }).catch(() => {});
   if (!state.briefs.has(item.id)) api(`/items/${item.id}/brief`).then(b => { if (b.brief && location.hash === here) { state.briefs.set(item.id, b.brief); $('#brief').outerHTML = briefBox(item); } }).catch(() => {});
-  // Complete the post on open: the thread's full text and inline images, the linked article, the picture, comments.
-  post(`/items/${item.id}/hydrate`)
-    .then(h => { if (location.hash === here) renderDetail({...item, ...h.item}, story, h.thread, {keepScroll: true}); })
-    .catch(err => { if (location.hash === here) renderDetail(item, story, null, {error: err.message, keepScroll: true}); });
+  if (item.community && ['reddit', 'hackernews'].includes(item.community.platform)) loadComments(item.id, {first: true});
+  const settle = fresh => { if (location.hash !== here) return; state.detail.hydrating = false; updateDetail(fresh); };
+  post(`/items/${item.id}/hydrate`).then(h => settle(h.item)).catch(() => settle(state.detail.item));
 }
-function videoId(item) {
-  const m = /[?&]v=([A-Za-z0-9_-]{11})/.exec(item.url || '') || /youtu\.be\/([A-Za-z0-9_-]{11})/.exec(item.url || '');
-  return item.metadata?.video_id || (m && m[1]);
+const norm = t => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 240);
+function detailParts(item, {hydrating = false} = {}) {
+  const c = item.community, yt = item.media?.kind === 'youtube';
+  let hero = '';
+  if (isVideo(item) || item.type === 'youtube_video') hero = mediaHtml(item, {reader: true});
+  else if (item.image_url && (['image', 'gallery'].includes(item.media?.kind) || !c || (item.image?.width || 999) >= 400)) {
+    hero = mediaHtml(item, {reader: true});
+    if (item.media?.kind === 'gallery') hero += `<p class="note">First image of a gallery — <a class="link" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">see all on Reddit ↗</a></p>`;
+  }
+  const bodyText = item.body || (item.type === 'youtube_video' ? item.content : '') || '';
+  const lead = bodyText || describe(item);
+  const body = bodyText ? `<div class="prose">${prose(bodyText)}</div>` : lead ? `<div class="prose"><p>${esc(lead)}</p></div>` : '';
+  // The linked page's text, unless it only repeats what is already shown (a video description, say).
+  const content = item.type !== 'youtube_video' ? item.content || '' : '';
+  const repeats = !content || norm(content) === norm(lead) || norm(lead).startsWith(norm(content).slice(0, 120));
+  const article = !repeats && (!item.body || content.length > item.body.length + 400) ? content : '';
+  const host = hostOf(item.link_url || item.url);
+  const linked = article ? `<section class="article"><div class="kicker">${c ? `From ${esc(yt ? 'the video description' : host)}` : 'Full text'}</div><div class="prose clamp-article">${prose(article)}</div>
+    ${article.length > 1800 ? '<button class="btn" data-act="expand-article">Continue reading</button>' : ''}</section>`
+    : hydrating && item.link_url && !yt && item.processing?.extraction !== 'done' ? `<p class="note loading-note">Fetching the article from ${esc(host)}…</p>` : '';
+  return {hero, body, linked};
+}
+function renderDetail(item, story, {hydrating = false} = {}) {
+  const c = item.community, r = item.repository;
+  const liked = item.user?.vote === 1, saved = item.user?.saved;
+  const platform = c?.platform === 'reddit' ? 'Reddit' : c?.platform === 'hackernews' ? 'Hacker News' : item.type === 'youtube_video' ? 'YouTube' : null;
+  const out = [];
+  if (platform) out.push(`<a class="btn" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">${icon('out')}<span class="wide">Open on </span>${platform}</a>`);
+  if (item.link_url || !platform) out.push(`<a class="btn" href="${esc(item.link_url || item.url)}" target="_blank" rel="noopener">${icon('out')}${esc(hostOf(item.link_url || item.url) || 'Open original')}</a>`);
+  const buttons = `<div class="row">${out.join('')}</div><div class="row" style="margin-top:8px">
+    <button class="btn ${liked ? 'on' : ''}" data-act="like" data-id="${item.id}">${icon('up')}More<span class="wide"> like this</span></button>
+    <button class="btn" data-act="dislike" data-id="${item.id}">${icon('down')}Less<span class="wide"> like this</span></button>
+    <button class="btn ${saved ? 'on' : ''}" data-act="save" data-id="${item.id}">${icon('save')}Save</button></div><div id="detail-fb"></div>`;
+  const {hero, body, linked} = detailParts(item, {hydrating});
+  const why = item.why?.length ? `<div class="why"><div class="kicker">Why you're seeing this</div><ul>${item.why.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>` : '';
+  const repo = r ? `<p class="note">${[r.stars != null && `★ ${compact(r.stars)} stars`, r.stars_delta_7d != null && `+${r.stars_delta_7d} this week`, r.license, r.language].filter(Boolean).map(esc).join(' · ')}</p>` : '';
+  const talk = c && ['reddit', 'hackernews'].includes(c.platform) ? `<section class="sec">${secHead(c.comments != null ? `Comments · ${compact(c.comments)}` : 'Comments', `<a href="#" data-act="refresh-comments" data-id="${item.id}">Refresh</a>`)}<div id="comments"><div class="sk" style="width:70%"></div><div class="sk" style="width:50%"></div></div></section>` : '';
+  $('#main').innerHTML = `<article class="detail" data-detail="${item.id}"><a class="back" href="javascript:history.back()">${icon('back')}Back</a><div id="d-meta">${metaLine(item, {author: true})}</div>
+    <h1>${esc(r?.full_name && item.type === 'github_repository' ? r.full_name : item.title)}</h1>${repo}<div id="d-hero">${hero}</div>${buttons}${briefBox(item)}<div id="d-body">${body}</div><div id="d-article">${linked}</div><div id="d-why">${why}</div></article>
+    <div id="d-also">${story ? alsoHtml(item, story) : ''}</div>${talk}`;
+  if (state.detail?.item?.id === item.id) state.detail.html = {'#d-hero': hero, '#d-body': body, '#d-article': linked, '#d-meta': metaLine(item, {author: true})};
+}
+// Replace only the sections whose content changed; never interrupt a playing video.
+function updateDetail(fresh) {
+  const d = state.detail, cur = d?.item;
+  const item = cur && cur.id === fresh.id ? {...cur, ...fresh, why: fresh.why || cur.why} : fresh;
+  state.items.set(item.id, item);
+  if (d) d.item = item;
+  if (!$(`[data-detail="${item.id}"]`)) return renderDetail(item, d?.story, {hydrating: d?.hydrating});
+  const parts = detailParts(item, {hydrating: !!d?.hydrating});
+  const seen = d ? d.html : {};
+  const swap = (sel, html) => { const el = $(sel); if (el && seen[sel] !== html && el.innerHTML !== html) { el.innerHTML = html; } seen[sel] = html; };
+  if (!$('#d-hero .playing')) swap('#d-hero', parts.hero);
+  swap('#d-body', parts.body); swap('#d-article', parts.linked);
+  swap('#d-meta', metaLine(item, {author: true}));
+  if (item.why?.length) swap('#d-why', `<div class="why"><div class="kicker">Why you're seeing this</div><ul>${item.why.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>`);
+}
+// Other posts of the same story: one compact line each (a repost says so instead of "coverage").
+function alsoHtml(item, story) {
+  const others = story?.story?.sources?.filter(x => x.id !== item.id) || [];
+  if (!others.length) return '';
+  const reposts = others.every(x => x.title === item.title);
+  const lines = others.slice(0, 8).map(x => { state.items.set(x.id, x); const src = sourceOf(x), n = x.community?.comments;
+    return `<a class="also" href="#/item/${x.id}"><span class="src">${esc(src.label)}</span><span>${age(x.published_at || x.first_seen_at)}</span>${n != null ? `<span>${plural(n, 'comment')}</span>` : ''}${x.title !== item.title ? `<b>${esc(x.title)}</b>` : ''}</a>`; }).join('');
+  return `<section class="sec">${secHead(reposts ? (others.length === 1 ? 'Also posted' : `Also posted ${others.length} times`) : `Also covered by ${others.length} more`)}<div class="also-list">${lines}</div></section>`;
 }
 function briefBox(item) {
   const b = state.briefs.get(item.id);
@@ -344,44 +493,6 @@ function briefBox(item) {
   return `<div id="brief" class="brief"><div class="kicker">✦ Summary</div><p>${esc(b.tldr)}</p>${points(b.key_points)}
     ${b.discussion ? `<div class="kicker" style="margin-top:10px">What people say</div><p>${esc(b.discussion)}</p>${points(b.discussion_points)}` : ''}
     <p class="note">${esc(b.model || 'local model')} · <a href="#" class="link" data-act="brief" data-refresh="1" data-id="${item.id}">Refresh</a></p></div>`;
-}
-function renderDetail(item, story, thread, {hydrating = false, keepScroll = false, error = null} = {}) {
-  const c = item.community, r = item.repository;
-  const liked = item.user?.vote === 1, saved = item.user?.saved;
-  const platform = c?.platform === 'reddit' ? 'Reddit' : c?.platform === 'hackernews' ? 'Hacker News' : item.type === 'youtube_video' ? 'YouTube' : null;
-  const out = [];
-  if (platform) out.push(`<a class="btn" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">${icon('out')}Open on ${platform}</a>`);
-  if (item.link_url || !platform) out.push(`<a class="btn" href="${esc(item.link_url || item.url)}" target="_blank" rel="noopener">${icon('out')}${esc(hostOf(item.link_url || item.url) || 'Open original')}</a>`);
-  const buttons = `<div class="row">${out.join('')}</div><div class="row" style="margin-top:8px">
-    <button class="btn ${liked ? 'on' : ''}" data-act="like" data-id="${item.id}">${icon('up')}More like this</button>
-    <button class="btn" data-act="dislike" data-id="${item.id}">${icon('down')}Less like this</button>
-    <button class="btn ${saved ? 'on' : ''}" data-act="save" data-id="${item.id}">${icon('save')}Save</button></div><div id="detail-fb"></div>`;
-  const vid = item.type === 'youtube_video' && videoId(item);
-  let hero = '';
-  // Click-to-play: YouTube is only contacted once you press play (privacy-enhanced domain).
-  if (vid) hero = `<button class="yt" data-act="play" data-vid="${esc(vid)}" aria-label="Play video">${item.image_url ? `<img src="${esc(item.image_url)}" alt="">` : ''}<span class="play">▶</span></button>`;
-  else if (item.image_url && (c?.kind === 'media' || !c)) {
-    hero = `<div class="hero" data-act="zoom" data-src="${esc(item.image_url)}" title="Click to enlarge"><img src="${esc(item.image_url)}" alt=""></div>`;
-    if (c?.media === 'gallery') hero += `<p class="note">First image of a gallery — <a class="link" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">see all on Reddit ↗</a></p>`;
-    if (c?.media === 'video') hero += `<p class="note">Video — <a class="link" href="${esc(discussionUrl(item))}" target="_blank" rel="noopener">play on Reddit ↗</a></p>`;
-  }
-  const bodyText = item.body || (item.type === 'youtube_video' ? item.content : '') || '';
-  const body = bodyText ? `<div class="prose">${prose(bodyText)}</div>` : describe(item) ? `<div class="prose"><p>${esc(describe(item))}</p></div>` : '';
-  const article = item.type !== 'youtube_video' && item.content && (!item.body || item.content.length > item.body.length + 400) ? item.content : '';
-  const articleHost = hostOf(item.link_url || item.url);
-  const linked = article ? `<section class="article"><div class="kicker">${c ? `From ${esc(articleHost)}` : 'Full text'}</div><div class="prose clamp-article">${prose(article)}</div>
-    ${article.length > 1800 ? '<button class="btn" data-act="expand-article">Continue reading</button>' : ''}</section>`
-    : hydrating && item.link_url ? `<p class="note">Fetching the article from ${esc(articleHost)}…</p>` : '';
-  const why = item.why?.length ? `<div class="why"><div class="kicker">Why you're seeing this</div><ul>${item.why.map(w => `<li>${esc(w)}</li>`).join('')}</ul></div>` : '';
-  const others = story ? story.story.sources.filter(x => x.id !== item.id) : [];
-  const coverage = others.length ? `<section class="sec">${secHead(`Also covered by ${others.length} more`)}${list(others, {text: false})}</section>` : '';
-  const repo = r ? `<p class="note">${[r.stars != null && `★ ${compact(r.stars)} stars`, r.stars_delta_7d != null && `+${r.stars_delta_7d} this week`, r.license, r.language].filter(Boolean).map(esc).join(' · ')}</p>` : '';
-  const commentsBody = thread ? commentsHtml(thread, item) : error ? `<p class="note">Couldn't load comments (${esc(error)}).</p>` : '<div class="sk" style="width:70%"></div><div class="sk" style="width:50%"></div>';
-  const talk = c && ['reddit', 'hackernews'].includes(c.platform) ? `<section class="sec">${secHead(c.comments != null ? `Comments · ${compact(c.comments)}` : 'Comments', `<a href="#" data-act="refresh-comments" data-id="${item.id}">Refresh</a>`)}<div id="comments">${commentsBody}</div></section>` : '';
-  const y = scrollY;
-  $('#main').innerHTML = `<article class="detail"><a class="back" href="javascript:history.back()">${icon('back')}Back</a>${metaLine(item, {author: true})}
-    <h1>${esc(r?.full_name && item.type === 'github_repository' ? r.full_name : item.title)}</h1>${repo}${buttons}${briefBox(item)}${hero}${body}${linked}${why}</article>${coverage}${talk}`;
-  if (keepScroll) scrollTo(0, y);
 }
 async function summarize(btn) {
   const id = Number(btn.dataset.id), item = state.items.get(id) || {id};
@@ -424,13 +535,38 @@ function commentsHtml(t, item) {
     ${rest.length ? `<button class="show-all" data-act="all-comments">Show ${plural(rest.length, 'more comment')}</button>` : ''}
     <p class="note">${total && total > t.comments.length ? `Showing ${t.comments.length} of ${compact(total)}. <a class="link" href="${esc(item ? discussionUrl(item) : '#')}" target="_blank" rel="noopener">All comments on ${item?.community?.platform === 'hackernews' ? 'Hacker News' : 'Reddit'} ↗</a>` : ''}</p>`;
 }
-async function loadComments(id, refresh) {
-  const box = $('#comments'); if (!box) return;
-  box.innerHTML = '<div class="sk" style="width:70%"></div><div class="sk" style="width:50%"></div>';
+// Comments: the stored copy first (instant), then a refresh when it is stale. When Reddit asks us to
+// slow down, the stored copy stays up and Radar tries again by itself after the pause.
+async function loadComments(id, {first = false, refresh = false} = {}) {
+  const box = $('#comments'), here = location.hash; if (!box) return;
+  clearInterval(state.retryTimer);
+  const item = () => state.items.get(Number(id));
+  let shown = false;
+  if (first) {
+    const cached = await api(`/items/${id}/comments?cached=true`).catch(() => null);
+    if (location.hash !== here) return;
+    if (cached?.comments.length) { box.innerHTML = commentsHtml(cached, item()) + (cached.stale ? '<p class="note loading-note">Checking for new comments…</p>' : ''); shown = true; }
+    if (cached?.comments.length && !cached.stale) return;
+  } else if (refresh) box.insertAdjacentHTML('afterbegin', '<p class="note loading-note">Refreshing…</p>');
   try {
     const t = await api(`/items/${id}/comments${refresh ? '?refresh=true' : ''}`);
-    box.innerHTML = commentsHtml(t, state.items.get(Number(id)));
-  } catch (err) { box.innerHTML = `<p class="note">Couldn't load comments (${esc(err.message)}).</p>`; }
+    if (location.hash !== here) return;
+    if (t.item) updateDetail(t.item);
+    if (t.retry_in) {
+      if (!t.comments.length && !shown) box.innerHTML = '';
+      else if (t.comments.length) box.innerHTML = commentsHtml(t, item());
+      box.querySelector('.loading-note')?.remove();
+      box.insertAdjacentHTML('afterbegin', `<p class="note wait-note">Reddit asked Radar to slow down${t.comments.length ? ' — showing the saved comments' : ''}. Trying again in <b>${t.retry_in}</b>s.</p>`);
+      let left = t.retry_in;
+      state.retryTimer = setInterval(() => {
+        if (location.hash !== here) return clearInterval(state.retryTimer);
+        left -= 1; const b = $('.wait-note b', box); if (b) b.textContent = Math.max(0, left);
+        if (left <= 0) { clearInterval(state.retryTimer); loadComments(id); }
+      }, 1000);
+      return;
+    }
+    box.innerHTML = commentsHtml(t, item());
+  } catch (err) { if (location.hash === here && !shown) box.innerHTML = `<p class="note">Couldn't load comments (${esc(err.message)}).</p>`; else box.querySelector('.loading-note')?.remove(); }
 }
 
 // ---------------------------------------------------------------- lists: explore, projects, saved, history, search
@@ -634,10 +770,11 @@ document.addEventListener('click', e => {
   else if (act === 'explore-page') explore({...state.explore, offset: Math.max(0, (state.explore?.offset || 0) + Number(el.dataset.dir) * 50)});
   else if (act === 'project-sort') projects(el.dataset.sort);
   else if (act === 'source-status') api(`/sources/${el.dataset.id}`, {method: 'PATCH', body: JSON.stringify({status: el.dataset.status})}).then(() => { toast('Updated'); state.fresh = true; route(); }).catch(err => toast(err.message));
-  else if (act === 'refresh-comments') { e.preventDefault(); loadComments(el.dataset.id, true); }
+  else if (act === 'refresh-comments') { e.preventDefault(); loadComments(el.dataset.id, {refresh: true}); }
   else if (act === 'zoom') openLightbox(el.dataset.src);
   else if (act === 'brief') { e.preventDefault(); summarize(el); }
-  else if (act === 'play') el.outerHTML = `<div class="yt"><iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(el.dataset.vid)}?autoplay=1&rel=0" title="Video" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe></div>`;
+  else if (act === 'play') { e.preventDefault(); play(el); }
+  else if (act === 'refresh-page') { el.remove(); state.fresh = true; scrollTo(0, 0); route(); }
   else if (act === 'expand-article') { $('.clamp-article')?.classList.add('open'); el.remove(); }
   else if (act === 'search-tab') { state.searchTab = el.dataset.tab; search(decodeURIComponent(location.hash.replace(/^#\/search\//, ''))); }
   else if (act === 'videos-sort') { store.set('radar-videos-sort', el.dataset.sort); state.fresh = true; route(); }
@@ -666,8 +803,18 @@ document.addEventListener('submit', e => {
 document.addEventListener('click', e => { const menu = $('.menu'); if (menu?.open && !e.target.closest('.menu')) menu.removeAttribute('open'); });
 
 // Inline post images keep placeholder height until loaded (so lazy loading triggers), and vanish if gone.
-document.addEventListener('load', e => { if (e.target.matches?.('.inline-img img')) e.target.closest('figure').classList.add('loaded'); }, true);
-document.addEventListener('error', e => { if (e.target.matches?.('.inline-img img')) e.target.closest('figure').classList.add('failed'); }, true);
+document.addEventListener('load', e => {
+  const t = e.target;
+  if (t.matches?.('.inline-img img')) t.closest('figure').classList.add('loaded');
+  if (t.matches?.('.media img[data-measure]')) measure(t);
+}, true);
+// A picture that turns out not to exist leaves no empty frame behind (a video keeps its play button).
+document.addEventListener('error', e => {
+  const t = e.target;
+  if (t.matches?.('.inline-img img')) t.closest('figure').classList.add('failed');
+  else if (t.matches?.('.thumb img')) t.closest('.thumb').remove();
+  else if (t.matches?.('.media img')) { const box = t.closest('.media'); if (box?.classList.contains('video')) box.querySelectorAll('img').forEach(i => i.remove()); else box?.remove(); }
+}, true);
 
 // ---------------------------------------------------------------- lightbox & keyboard
 function openLightbox(src) {
@@ -711,6 +858,25 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'x') press('hide');
 });
 
+// ---------------------------------------------------------------- "N new posts" (open pages stay current without reloading)
+const PILL_SCOPES = {today: 'today', reddit: 'reddit', hn: 'hn', videos: 'videos'};
+async function checkUpdates() {
+  const page = (location.hash || '#/today').replace(/^#\//, '').split('/')[0] || 'today', scope = PILL_SCOPES[page];
+  if (!scope || !state.loadedAt || document.visibilityState !== 'visible') return;
+  try {
+    const u = await api(`/updates?since=${encodeURIComponent(state.loadedAt)}&scope=${scope}`);
+    if (u.new > 0 && PILL_SCOPES[(location.hash || '#/today').replace(/^#\//, '').split('/')[0] || 'today'] === scope) showPill(u.new);
+  } catch { /* offline for a moment */ }
+}
+function showPill(n) {
+  let pill = $('#pill');
+  if (!pill) { pill = document.createElement('button'); pill.id = 'pill'; pill.className = 'pill'; pill.dataset.act = 'refresh-page'; document.body.append(pill); }
+  pill.textContent = `↑ ${n} new ${n === 1 ? 'post' : 'posts'}`;
+}
+setInterval(checkUpdates, 90e3);
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') hiddenAt = Date.now(); else if (Date.now() - hiddenAt > 60e3) checkUpdates(); });
+
 // ---------------------------------------------------------------- routing (Back restores list pages and scroll)
 const CACHEABLE = new Set(['today', 'reddit', 'hn', 'videos', 'explore', 'projects', 'saved', 'history', 'search']);
 let currentHash = null;
@@ -718,17 +884,21 @@ async function route() {
   const hash = location.hash || '#/today';
   const [name, ...rest] = hash.replace(/^#\//, '').split('/');
   const arg = decodeURIComponent(rest.join('/'));
-  if (currentHash && CACHEABLE.has(currentHash.split('/')[1])) state.cache.set(currentHash, {html: $('#main').innerHTML, y: scrollY, feed: state.feed, at: Date.now()});
+  // A page kept for Back keeps its video covers, not a player that would come back silent.
+  $$('#main .media.playing[data-player]').forEach(box => { const cover = state.posters.get(box.dataset.player); if (cover) box.outerHTML = cover; });
+  if (currentHash && CACHEABLE.has(currentHash.split('/')[1])) state.cache.set(currentHash, {html: $('#main').innerHTML, y: scrollY, feed: state.feed, at: Date.now(), loadedAt: state.loadedAt});
   const prev = currentHash; currentHash = hash;
   const page = name || 'today';
+  stopPlayers(); state.audios.clear(); clearInterval(state.retryTimer); $('#pill')?.remove();
   $$('[data-route]').forEach(a => a.classList.toggle('active', a.dataset.route === page));
   $('#main').classList.remove('wide');
   $('.top').classList.remove('searching');
   const cached = state.cache.get(hash);
   if (!state.fresh && cached && prev !== hash && Date.now() - cached.at < 15 * 60e3) {
-    $('#main').innerHTML = cached.html; state.feed = cached.feed; requestAnimationFrame(() => scrollTo(0, cached.y)); return;
+    $('#main').innerHTML = cached.html; state.feed = cached.feed; state.loadedAt = cached.loadedAt; requestAnimationFrame(() => scrollTo(0, cached.y)); checkUpdates(); return;
   }
   state.fresh = false;
+  state.loadedAt = new Date().toISOString();
   try {
     if (page === 'today') await today();
     else if (page === 'reddit') await communityPage('reddit', arg || null);

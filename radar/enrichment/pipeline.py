@@ -1,13 +1,15 @@
 """Bounded enrichment stages. Every stage is independently retryable."""
 from __future__ import annotations
 
+import asyncio
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from radar.config import Config
 from radar.db.models import Article, Image, Item, ItemScore
 from radar.extraction.article import extract_article
-from radar.extraction.canonical_url import url_hash
+from radar.extraction.canonical_url import url_hash, youtube_video_id
 from radar.extraction.images import ImageCache, ImageRejected, order_candidates, reopen_image_stage
 from radar.net import Http, HttpError
 from radar.services.search import index_items
@@ -18,11 +20,15 @@ from radar.util import utcnow
 async def extract_item(session: Session, http: Http, item: Item) -> bool:
     """Fetch and extract the page an item points to (the linked article for community posts)."""
     target = item.link_url or item.canonical_url
+    if item.content_type != "youtube_video" and youtube_video_id(target):
+        item.extraction_state = "skipped"  # script-rendered watch page; the reader embeds the video
+        return False
     session.commit()  # no transaction stays open across the fetch (see cache_item_image)
     try:
         response = await http.get(target, headers={"Accept": "text/html,application/xhtml+xml"},
                                   max_bytes=6_000_000, retries=1)
-        result = extract_article(response.text, response.url, item.clean_text or item.excerpt)
+        # Parsing a large page takes CPU seconds; off the event loop, the API keeps answering meanwhile.
+        result = await asyncio.to_thread(extract_article, response.text, response.url, item.clean_text or item.excerpt)
     except (HttpError, ValueError, OSError) as exc:
         item.extraction_state = "failed"
         item.stage_attempts = dict(item.stage_attempts or {}) | {"extraction": str(exc)[:300]}

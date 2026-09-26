@@ -8,6 +8,10 @@ fields stay null.
 - Reddit: OAuth JSON -> anonymous old.reddit JSON (skipped while a network-wide block is
   remembered in KV `reddit.json_blocked_until`) -> www.reddit.com thread Atom feed.
 - Hacker News: a single Algolia `items/<id>` request returns the whole tree.
+
+Reddit's anonymous budget is small, so the reader never waits on it: a cached thread is shown at
+once, a 429 starts the shared cooldown (see radar.collectors.reddit) and the answer says when to try
+again (`retry_in`), and background prefetching pauses while someone is reading.
 """
 from __future__ import annotations
 
@@ -22,6 +26,9 @@ from radar.collectors.reddit import (
     JSON_BLOCK_HOURS,
     WWW,
     RedditAuth,
+    RedditRateLimited,
+    cooldown_remaining,
+    interactive_recent,
     post_to_raw,
     reddit_json,
     reddit_rss,
@@ -85,8 +92,8 @@ def _mark_json_blocked(session: Session) -> None:
     row.value = {"until": iso(utcnow() + timedelta(hours=JSON_BLOCK_HOURS))}
 
 
-async def _reddit_thread(session: Session, http: Http, config: Config,
-                         post: CommunityPost) -> tuple[list[dict[str, Any]], str, RawItem | None]:
+async def _reddit_thread(session: Session, http: Http, config: Config, post: CommunityPost,
+                         interactive: bool = False) -> tuple[list[dict[str, Any]], str, RawItem | None]:
     """Comments plus the post itself as the thread presents it (the most complete copy of its text)."""
     sub = post.community or "all"
     auth = RedditAuth(http, config)
@@ -101,11 +108,13 @@ async def _reddit_thread(session: Session, http: Http, config: Config,
                 children = (data[0].get("data") or {}).get("children") or []
                 first = post_to_raw(children[0].get("data") or {}) if children else None
             return out, "oauth" if auth.enabled else "json", first
+        except RedditRateLimited:
+            raise
         except (HttpError, ValueError, KeyError):
             if not auth.enabled:
                 _mark_json_blocked(session)
     parsed = await reddit_rss(http, f"{WWW}/r/{sub}/comments/{post.post_id}/.rss",
-                              {"limit": MAX_COMMENTS, "sort": "top"})
+                              {"limit": MAX_COMMENTS, "sort": "top"}, interactive=interactive)
     out = []
     first = None
     for entry in parsed.entries:
@@ -160,18 +169,23 @@ async def _hn_thread(http: Http, post: CommunityPost) -> tuple[list[dict[str, An
     return out, "algolia"
 
 
-async def fetch_thread(session: Session, http: Http, config: Config, item: Item) -> CommentSummary:
-    """Fetch and cache the discussion for one community item. Raises HttpError/ValueError."""
+async def fetch_thread(session: Session, http: Http, config: Config, item: Item, *,
+                       interactive: bool = False) -> tuple[CommentSummary, bool]:
+    """Fetch and cache the discussion for one community item -> (row, post text/images changed).
+    Raises HttpError/ValueError (RedditRateLimited while Reddit's cooldown runs)."""
     post = session.get(CommunityPost, item.id)
     if post is None or post.platform not in ("reddit", "hackernews"):
         raise ValueError("item has no supported discussion thread")
     session.commit()  # no transaction stays open across the network fetch (WAL snapshot rule)
+    updated = False
     try:
         if post.platform == "reddit":
-            comments, via, first = await _reddit_thread(session, http, config, post)
-            refresh_post(item, first)
+            comments, via, first = await _reddit_thread(session, http, config, post, interactive)
+            updated = refresh_post(item, first)
         else:
             comments, via = await _hn_thread(http, post)
+    except RedditRateLimited:
+        raise  # not the thread's fault; try again after the cooldown
     except (HttpError, ValueError):
         item.comments_state = "failed"
         raise
@@ -185,34 +199,62 @@ async def fetch_thread(session: Session, http: Http, config: Config, item: Item)
     row.state = "fetched"
     row.summary = {"via": via}
     item.comments_state = "done"
-    return row
+    return row, updated
 
 
-def thread_dict(row: CommentSummary | None, *, stale: bool = False, error: str | None = None) -> dict:
+def thread_dict(row: CommentSummary | None, *, stale: bool = False, error: str | None = None,
+                retry_in: float | None = None, post_updated: bool = False) -> dict:
     return {"comments": row.comments if row else [], "count": row.sampled if row else 0,
             "fetched_at": iso(row.fetched_at) if row else None,
-            "via": (row.summary or {}).get("via") if row else None, "stale": stale, "error": error}
+            "via": (row.summary or {}).get("via") if row else None, "stale": stale, "error": error,
+            "retry_in": round(retry_in) if retry_in else None, "post_updated": post_updated}
+
+
+def friendly_error(exc: Exception, platform: str) -> str:
+    """What went wrong, in words (no URLs, no feed tokens)."""
+    site = "Reddit" if platform == "reddit" else "Hacker News"
+    code = getattr(exc, "status_code", None)
+    if code == 404:
+        return "the thread is gone (deleted or removed)"
+    if code in (401, 403):
+        return f"{site} refused the request"
+    if code:
+        return f"{site} answered with an error ({code})"
+    if isinstance(exc, ValueError):
+        return str(exc)[:160]
+    return f"{site} didn't answer in time"
 
 
 async def get_thread(session: Session, http: Http, config: Config, item: Item, *,
-                     max_age_minutes: int = 20, refresh: bool = False) -> dict:
-    """Cached thread when fresh enough, otherwise a live fetch that degrades to the cache."""
+                     max_age_minutes: int = 20, refresh: bool = False, cached_only: bool = False) -> dict:
+    """The thread for the reader: cached when fresh (or when asked for `cached_only`), otherwise
+    fetched now; a failed or rate-limited fetch degrades to the cached copy."""
     row = session.scalar(select(CommentSummary).where(CommentSummary.item_id == item.id))
-    if row and not refresh and row.fetched_at >= utcnow() - timedelta(minutes=max_age_minutes):
-        return thread_dict(row)
+    fresh = row is not None and row.fetched_at >= utcnow() - timedelta(minutes=max_age_minutes)
+    if cached_only or (fresh and not refresh):
+        return thread_dict(row, stale=row is not None and not fresh)
+    post = session.get(CommunityPost, item.id)
+    platform = post.platform if post else ""
+    if platform == "reddit" and (wait := cooldown_remaining()) > 0:
+        return thread_dict(row, stale=row is not None, retry_in=wait)
     try:
-        return thread_dict(await fetch_thread(session, http, config, item))
+        fetched, updated = await fetch_thread(session, http, config, item, interactive=True)
+        return thread_dict(fetched, post_updated=updated)
+    except RedditRateLimited as exc:
+        return thread_dict(row, stale=row is not None, retry_in=exc.retry_after)
     except (HttpError, ValueError) as exc:
-        return thread_dict(row, stale=row is not None, error=str(exc)[:300])
+        return thread_dict(row, stale=row is not None, error=friendly_error(exc, platform))
 
 
 async def prefetch_threads(session: Session, http: Http, config: Config, limit: int = 6) -> dict[str, int]:
-    """Worker stage: cache threads of the best-ranked community candidates."""
+    """Worker stage: cache threads of the best-ranked community candidates, so opening them is
+    instant. Reddit is skipped during its cooldown and while the reader is using the budget."""
+    skip_reddit = cooldown_remaining() > 0 or interactive_recent()
     rows = session.scalars(
         select(Item).join(ItemScore, ItemScore.item_id == Item.id)
         .join(CommunityPost, CommunityPost.item_id == Item.id)
         .where(ItemScore.is_candidate.is_(True), Item.comments_state == "none", Item.is_hidden.is_(False),
-               CommunityPost.platform.in_(("reddit", "hackernews")),
+               CommunityPost.platform.in_(("hackernews",) if skip_reddit else ("reddit", "hackernews")),
                # Atom-collected Reddit posts have unknown comment counts; HN counts are exact.
                or_(CommunityPost.platform == "reddit", CommunityPost.num_comments > 0))
         .order_by(ItemScore.final_score.desc()).limit(limit)
@@ -222,7 +264,10 @@ async def prefetch_threads(session: Session, http: Http, config: Config, limit: 
         try:
             await fetch_thread(session, http, config, item)
             done += 1
+        except RedditRateLimited:
+            session.commit()
+            break  # the cooldown started; the rest waits for the next cycle
         except (HttpError, ValueError):
             failed += 1
         session.commit()
-    return {"attempted": len(rows), "done": done, "failed": failed}
+    return {"attempted": len(rows), "done": done, "failed": failed, "reddit_paused": skip_reddit}

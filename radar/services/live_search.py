@@ -18,6 +18,7 @@ from radar.extraction.canonical_url import canonicalize, url_hash
 from radar.net import Http
 from radar.normalization.models import RawItem
 from radar.ranking import score_item
+from radar.ranking.scorer import rank_context
 from radar.services.ingest import ingest_items
 
 WHERE = ("reddit", "hackernews")
@@ -51,6 +52,7 @@ async def live_search(session: Session, http: Http, q: str, where: str = "reddit
     ingest_items(session, None, raws)
     by_hash: dict[str, Item] = {i.url_hash: i for i in session.scalars(select(Item).where(Item.url_hash.in_(hashes)))}
     ordered: list[Item] = []
+    ctx = rank_context(session)  # once, not per result
     for h in hashes:
         item = by_hash.get(h)
         if item is None or item in ordered:
@@ -59,6 +61,6 @@ async def live_search(session: Session, http: Http, q: str, where: str = "reddit
             meta: dict[str, Any] = dict(item.meta or {})
             item.meta = meta | {"via_search": True}
         if item.score is None:
-            score_item(session, item)
+            score_item(session, item, ctx)
         ordered.append(item)
     return ordered

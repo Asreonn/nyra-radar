@@ -20,6 +20,7 @@ from radar.extraction.canonical_url import (
     domain_of,
     github_repo_from_url,
     url_hash,
+    youtube_video_id,
 )
 from radar.extraction.images import reopen_image_stage
 from radar.normalization.models import RawItem
@@ -54,6 +55,8 @@ def _initial_states(item: Item, norm: Normalized) -> None:
                                                                         "telegram_post"))
     if norm.raw.meta.get("unresolved_redirect") or (target and github_repo_from_url(target)):
         needs_extraction = False
+    if target and ctype != "youtube_video" and youtube_video_id(target):
+        needs_extraction = False  # a watch page is script-rendered: nothing to extract, the video is embedded
     item.extraction_state = "pending" if needs_extraction else "skipped"
     item.image_state = "pending"
     item.embedding_state = "pending"
@@ -213,10 +216,19 @@ def _store_links(session: Session, item: Item, raw: RawItem) -> None:
         ).on_conflict_do_nothing(index_elements=["item_id", "url_hash"]))
 
 
+def add_video_cover(raw: RawItem) -> None:
+    """Posts that link a YouTube video get the video's own cover, known without fetching the page."""
+    vid = youtube_video_id(raw.link_url) if raw.content_type != "youtube_video" else None
+    if vid:
+        raw.add_image("youtube_thumb", f"https://i.ytimg.com/vi/{vid}/maxresdefault.jpg")
+        raw.add_image("youtube_thumb", f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg")
+
+
 def ingest_items(session: Session, source: Source | None, raws: list[RawItem]) -> IngestStats:
     stats = IngestStats(seen=len(raws))
     norms: dict[str, Normalized] = {}
     for raw in raws:
+        add_video_cover(raw)
         try:
             n = normalize(raw, source.id if source else None)
         except Exception as exc:  # noqa: BLE001 - malformed plugin/collector input is isolated per item

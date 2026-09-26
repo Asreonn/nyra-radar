@@ -12,6 +12,10 @@ Access order for every listing:
    answering. Atom has no vote counts, so the post's position in the hot/top listing is kept
    (`reddit_rank`) and used by the ranker as the engagement signal.
 
+Anonymous access has a small per-IP budget. A "too many requests" answer starts a cooldown that
+every Radar process shares (a timestamp file in the runtime directory): while it lasts no Reddit
+request is sent, background work defers instead of failing, and the reader shows what is cached.
+
 The identifier is a subreddit (`LocalLLaMA`, `r/LocalLLaMA`, or a `rust+golang` multireddit)
 or a Reddit feed URL, e.g. the private front-page feed from https://www.reddit.com/prefs/feeds
 which follows the user's own subscriptions. The old.reddit fallback idea comes from Horizon
@@ -21,13 +25,15 @@ from __future__ import annotations
 
 import base64
 import html
+import os
 import re
 import time
 from datetime import timedelta
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from radar.collectors.base import Collector, CollectorError, FetchResult, SourceSpec
+from radar import paths
+from radar.collectors.base import Collector, CollectorError, Deferred, FetchResult, SourceSpec
 from radar.collectors.feedutil import entry_html, entry_published, parse_feed
 from radar.config import Config
 from radar.extraction.canonical_url import extract_urls
@@ -55,6 +61,62 @@ MAX_INLINE_IMAGES = 12
 # Atom has no `stickied` flag; pinned community threads are recognisable by title.
 _PINNED_TITLE = re.compile(r"\b(mega ?thread|(daily|weekly|bi-weekly|monthly) (discussion|thread))\b",
                            re.IGNORECASE)
+
+
+DEFAULT_COOLDOWN = 60.0
+INTERACTIVE_TIMEOUT = 10.0
+
+
+class RedditRateLimited(HttpError):
+    """Reddit answered 429, or a shared cooldown from an earlier 429 is still running."""
+
+    def __init__(self, seconds: float):
+        super().__init__(f"Reddit asked Radar to slow down; retrying in {max(1, round(seconds))}s",
+                         429, seconds)
+
+
+def _stamp(name: str):
+    return paths.runtime_dir() / name
+
+
+def _read_stamp(name: str) -> float:
+    try:
+        return float(_stamp(name).read_text().strip() or 0)
+    except (OSError, ValueError):
+        return 0.0
+
+
+def _write_stamp(name: str, value: float) -> None:
+    path = _stamp(name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".{os.getpid()}")
+        tmp.write_text(f"{value:.3f}")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def cooldown_remaining() -> float:
+    """Seconds left on the shared Reddit cooldown (0 when requests may go out)."""
+    return max(0.0, _read_stamp("reddit-cooldown") - time.time())
+
+
+def start_cooldown(seconds: float | None) -> float:
+    wait = max(15.0, min(float(seconds or DEFAULT_COOLDOWN), 600.0))
+    until = time.time() + wait
+    if until > _read_stamp("reddit-cooldown"):
+        _write_stamp("reddit-cooldown", until)
+    return wait
+
+
+def note_interactive() -> None:
+    """The reader just asked Reddit for something; background prefetching steps aside for a while."""
+    _write_stamp("reddit-interactive", time.time())
+
+
+def interactive_recent(seconds: float = 120.0) -> bool:
+    return time.time() - _read_stamp("reddit-interactive") < seconds
 
 
 class RedditAuth:
@@ -92,20 +154,42 @@ async def reddit_json(http: Http, auth: RedditAuth | None, path: str, params: di
     if auth and auth.enabled:
         headers = await auth.headers()
         return (await http.get(OAUTH + path, headers=headers, params=params)).json()
-    resp = await http.get(OLD + path.rstrip("/") + ".json", headers={"User-Agent": BROWSER_UA},
-                          params=params, retries=0)
+    if (wait := cooldown_remaining()) > 0:
+        raise RedditRateLimited(wait)
+    try:
+        resp = await http.get(OLD + path.rstrip("/") + ".json", headers={"User-Agent": BROWSER_UA},
+                              params=params, retries=0, retry_on_429=False)
+    except HttpError as exc:
+        if exc.status_code == 429:
+            raise RedditRateLimited(start_cooldown(exc.retry_after)) from exc
+        raise
     if "/login" in urlsplit(resp.url).path:
         raise ValueError("anonymous JSON redirected to login")
     return resp.json()
 
 
-async def reddit_rss(http: Http, url: str, params: dict[str, Any] | None = None) -> Any:
-    """GET a www.reddit.com Atom feed with the descriptive agent Reddit expects."""
+async def reddit_rss(http: Http, url: str, params: dict[str, Any] | None = None, *,
+                     interactive: bool = False) -> Any:
+    """GET a www.reddit.com Atom feed with the descriptive agent Reddit expects.
+
+    Honours the shared cooldown and never sleeps on 429 (it starts the cooldown and raises
+    RedditRateLimited). `interactive` requests (someone is waiting) fail fast: no retry, short timeout.
+    """
     parts = urlsplit(url)
     if parts.hostname in ("reddit.com", "old.reddit.com", "new.reddit.com"):
         url = urlunsplit(("https", "www.reddit.com", parts.path, parts.query, ""))
-    resp = await http.get(url, headers={"User-Agent": REDDIT_UA, "Accept": "application/atom+xml"},
-                          params=params, retries=1)
+    if (wait := cooldown_remaining()) > 0:
+        raise RedditRateLimited(wait)
+    if interactive:
+        note_interactive()
+    try:
+        resp = await http.get(url, headers={"User-Agent": REDDIT_UA, "Accept": "application/atom+xml"},
+                              params=params, retries=0 if interactive else 1, retry_on_429=False,
+                              timeout=INTERACTIVE_TIMEOUT if interactive else None)
+    except HttpError as exc:
+        if exc.status_code == 429:
+            raise RedditRateLimited(start_cooldown(exc.retry_after)) from exc
+        raise
     if "/login" in urlsplit(resp.url).path:
         raise HttpError("Reddit feed redirected to login", 403)
     return parse_feed(resp.content)
@@ -319,6 +403,7 @@ class RedditCollector(Collector):
         items: dict[str, RawItem] = {}
         errors: list[str] = []
         via = set()
+        rate_limited: RedditRateLimited | None = None
         for sort in sorts:
             params: dict[str, Any] = {"limit": min(100, limit + 5)}
             if sort in ("top", "controversial"):
@@ -329,16 +414,20 @@ class RedditCollector(Collector):
                     listing = await self._json_listing(sub, feed_url, sort, params, min_score)
                     via.add("oauth" if self.auth.enabled else "json")
                     state.pop("json_blocked_until", None)
+                except RedditRateLimited as exc:
+                    rate_limited = exc
                 except (HttpError, ValueError, KeyError) as exc:
                     if getattr(exc, "status_code", None) == 404:
                         raise CollectorError(f"r/{sub} not found", 404, permanent=True) from exc
                     errors.append(f"{sort} json: {exc}")
                     if not self.auth.enabled:
                         state["json_blocked_until"] = iso(utcnow() + timedelta(hours=JSON_BLOCK_HOURS))
-            if not listing:
+            if not listing and rate_limited is None:
                 try:
                     listing = await self._rss_listing(sub, feed_url, sort, params)
                     via.add("rss")
+                except RedditRateLimited as exc:
+                    rate_limited = exc
                 except (HttpError, ValueError) as exc:
                     code = getattr(exc, "status_code", None)
                     if code == 404:
@@ -346,7 +435,9 @@ class RedditCollector(Collector):
                     errors.append(f"{sort} rss: {exc}")
             for raw in listing:
                 items.setdefault(raw.source_item_id or raw.url, raw)
-        state["last_access"] = "+".join(sorted(via)) or "failed"
+        state["last_access"] = "+".join(sorted(via)) or ("deferred" if rate_limited else "failed")
+        if not items and rate_limited is not None:
+            raise Deferred(str(rate_limited), rate_limited.retry_after or DEFAULT_COOLDOWN)
         if not items and errors:
             raise CollectorError(redact_feed_tokens("; ".join(errors)[:500]))
         return FetchResult(items=list(items.values())[: limit * len(sorts)], status_code=200, state=state)

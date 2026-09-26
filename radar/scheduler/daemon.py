@@ -70,14 +70,20 @@ class Daemon:
             fresh = session.scalars(select(Item).where(Item.first_seen_at >= utcnow() - timedelta(days=7),
                                                        Item.processing_state == "normalized")
                                     .order_by(Item.first_seen_at.desc()).limit(300)).all()
+            # Commit after every stage: the API shares this database, and a write lock held across
+            # several stages (seconds, with a real embedding model) would make the reader wait.
             result["topics"] = classify_items(session, fresh)
+            session.commit()
             result["feedback"] = fold_events(session)
+            session.commit()
             state = self.gate.inspect()
             result["resource"] = state.__dict__
             if state.heavy_allowed:
                 result["embed"] = await embed_pending(session, self.embedder, limit=48)
+                session.commit()
             result["cluster"] = cluster_pending(session, limit=180)
-            result["rank"] = rescore(session)
+            session.commit()
+            result["rank"] = rescore(session, background=True)  # computed first, written in one short flush
             session.commit()  # release the write lock before the network-bound stages below
             # Network-only (no model): keep the best Reddit/HN discussions ready to read.
             result["comments"] = await prefetch_threads(

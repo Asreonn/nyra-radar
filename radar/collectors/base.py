@@ -50,6 +50,14 @@ class CollectorError(Exception):
         self.permanent = permanent
 
 
+class Deferred(CollectorError):
+    """The source asked us to come back later (rate limit). Not a failure: no backoff, no error shown."""
+
+    def __init__(self, message: str, retry_after: float):
+        super().__init__(message, 429)
+        self.retry_after = retry_after
+
+
 class MissingCredentials(CollectorError):
     def __init__(self, message: str):
         super().__init__(message, permanent=True)

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 import secrets
+import threading
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Annotated, Any
@@ -25,9 +27,8 @@ from radar.collectors import COLLECTORS
 from radar.collectors.reddit import full_size_image
 from radar.collectors.youtube import resolve_channel_id
 from radar.config import get_config
-from radar.db import get_engine, migrate, session_factory
+from radar.db import get_engine, migrate, session_factory, session_scope
 from radar.db.models import (
-    CommunityPost,
     DigestItem,
     DigestSession,
     DiscoveryCandidate,
@@ -41,10 +42,10 @@ from radar.db.models import (
 from radar.discovery.service import decide_trial, start_trial
 from radar.enrichment.comments import get_thread
 from radar.enrichment.pipeline import cache_item_image, extract_item, image_cache
-from radar.extraction.canonical_url import github_repo_from_url, url_hash
+from radar.extraction.canonical_url import github_repo_from_url, url_hash, youtube_video_id
 from radar.extraction.images import ImageRejected
 from radar.net import Http, HttpError
-from radar.ranking import build_feed, rescore, score_item
+from radar.ranking import build_feed, last_rescored, rescore, score_item, score_unscored
 from radar.services import reddit_account
 from radar.services.brief import BriefUnavailable, cached_brief, make_brief
 from radar.services.catalog import catalog
@@ -62,7 +63,7 @@ from radar.services.live_search import live_search
 from radar.services.search import hybrid, index_items
 from radar.services.settings import all_values, set_value
 from radar.services.taste import profile, tune_candidates, why
-from radar.util import iso, redact_feed_tokens, utcnow
+from radar.util import iso, parse_datetime, redact_feed_tokens, utcnow
 
 BODY_REQUIRED = Body(...)
 BODY_OPTIONAL = Body(default={})
@@ -91,6 +92,26 @@ def db_session():
 DB = Annotated[Session, Depends(db_session)]
 
 
+def commits(fn):
+    """Commit inside the endpoint call, before it returns. The dependency's own commit runs later,
+    after a trip through the event loop; a write transaction left open across that trip can stall an
+    async endpoint waiting (on the loop) for SQLite's write lock, and with it every other request."""
+    if asyncio.iscoroutinefunction(fn):
+        @functools.wraps(fn)
+        async def run_async(*args, **kwargs):
+            result = await fn(*args, **kwargs)
+            kwargs["db"].commit()
+            return result
+        return run_async
+
+    @functools.wraps(fn)
+    def run(*args, **kwargs):
+        result = fn(*args, **kwargs)
+        kwargs["db"].commit()
+        return result
+    return run
+
+
 _http: Http | None = None
 
 
@@ -98,8 +119,50 @@ def api_http() -> Http:
     """One paced HTTP client for on-demand fetches (discussion threads) from the API process."""
     global _http
     if _http is None:
-        _http = Http(max_concurrency=4)
+        _http = Http(max_concurrency=10)  # pictures, threads and articles load side by side
     return _http
+
+
+_rescore = {"running": False, "again": False}
+_rescore_lock = threading.Lock()
+# The worker re-ranks every cycle; the API only steps in when it has not for a while (worker stopped).
+RESCORE_MAX_AGE = timedelta(minutes=15)
+
+
+def _rescore_job(days: int) -> None:
+    with _rescore_lock:
+        if _rescore["running"]:
+            _rescore["again"] = True  # one more pass after the current one sees the latest feedback
+            return
+        _rescore["running"] = True
+    try:
+        while True:
+            with session_scope() as session:
+                rescore(session, days=days, background=True)
+            with _rescore_lock:
+                if not _rescore["again"]:
+                    return
+                _rescore["again"] = False
+    except Exception as exc:  # noqa: BLE001 - the worker rescores every cycle anyway
+        logging.getLogger(__name__).warning("background rescore failed: %s", exc)
+    finally:
+        with _rescore_lock:
+            _rescore["running"] = False
+
+
+_rescore_timer: threading.Timer | None = None
+
+
+def request_rescore(days: int = 8, delay: float = 3.0) -> None:
+    """Re-rank in the background (a full pass takes a few seconds); pages never wait for it. A burst
+    of clicks (rating a dozen posts on Tune) settles into one pass `delay` seconds after the last."""
+    global _rescore_timer
+    with _rescore_lock:
+        if _rescore_timer is not None:
+            _rescore_timer.cancel()
+        _rescore_timer = threading.Timer(delay, _rescore_job, args=(days,))
+        _rescore_timer.daemon = True
+        _rescore_timer.start()
 
 
 def _warm_vector_index() -> None:
@@ -204,15 +267,17 @@ def get_item(item_id: int, db: DB) -> dict:
 
 
 @app.post("/api/v1/items/{item_id}/hydrate")
+@commits
 async def hydrate(item_id: int, db: DB) -> dict:
-    """Make an opened item complete: the thread's full copy of a Reddit post (text, inline images),
-    the linked article when it has not been extracted yet, its picture, and the comments."""
+    """Make an opened item complete: the linked article when it has not been extracted yet, and its
+    picture. The discussion (and, for Reddit, the thread's fuller copy of the post) comes from
+    /comments, which the reader requests in parallel, so neither waits on the other."""
     item = db.get(Item, item_id)
     if item is None:
         raise HTTPException(404, "item not found")
-    http, cfg = api_http(), get_config()
+    http = api_http()
     extract_tries = int((item.stage_attempts or {}).get("on_demand_extractions", 0))
-    wants_article = bool(item.link_url) or item.content_type in ("article", "rss_entry")
+    wants_article = (bool(item.link_url) and not youtube_video_id(item.link_url)) or item.content_type in ("article", "rss_entry")
     # Every stage commits before the next network wait, so no write lock is held across I/O.
     if wants_article and item.extraction_state in ("pending", "failed") and extract_tries < 2:
         item.stage_attempts = dict(item.stage_attempts or {}) | {"on_demand_extractions": extract_tries + 1}
@@ -222,24 +287,48 @@ async def hydrate(item_id: int, db: DB) -> dict:
         else:
             await extract_item(db, http, item)
         db.commit()
-    thread = None
-    if db.get(CommunityPost, item.id) is not None:
-        thread = await get_thread(db, http, cfg, item)
-        db.commit()
     if item.image_state == "pending":
         await cache_item_image(db, image_cache(db, http), item)
     index_items(db, [item.id])
     db.commit()
-    return {"item": {**item_dict(db, item, detail=True), "why": why(db, item)}, "thread": thread}
+    return {"item": {**item_dict(db, item, detail=True), "why": why(db, item)}}
 
 
 @app.get("/api/v1/items/{item_id}/comments")
-async def comments(item_id: int, db: DB, refresh: bool = False) -> dict:
+@commits
+async def comments(item_id: int, db: DB, refresh: bool = False, cached: bool = False) -> dict:
+    """The discussion. `cached=true` answers from the local copy only (instant); otherwise a stale
+    copy is refreshed. Rate limits come back as `retry_in` seconds instead of an error."""
     item = db.get(Item, item_id)
     if item is None:
         raise HTTPException(404, "item not found")
-    thread = await get_thread(db, api_http(), get_config(), item, refresh=refresh)
-    return {"item_id": item_id, **thread}
+    thread = await get_thread(db, api_http(), get_config(), item, refresh=refresh, cached_only=cached)
+    db.commit()
+    if thread.get("post_updated"):
+        index_items(db, [item.id])
+        db.commit()
+        thread["item"] = {**item_dict(db, item, detail=True), "why": why(db, item)}
+    return thread
+
+
+UPDATE_SCOPES = {"reddit": "reddit_post", "hn": "hackernews_post", "videos": "youtube_video"}
+
+
+@app.get("/api/v1/updates")
+def updates(db: DB, since: str, scope: str = "today") -> dict:
+    """How many posts arrived since `since` (ISO time), so an open page can offer "N new posts"."""
+    from radar.db.models import ItemScore
+    cutoff = parse_datetime(since)
+    if cutoff is None:
+        raise HTTPException(422, "since must be an ISO time")
+    stmt = select(func.count(Item.id)).where(Item.first_seen_at > cutoff, Item.is_hidden.is_(False),
+                                             Item.duplicate_of.is_(None),
+                                             func.json_extract(Item.meta, "$.via_search").is_(None))
+    if scope in UPDATE_SCOPES:
+        stmt = stmt.where(Item.content_type == UPDATE_SCOPES[scope])
+    else:
+        stmt = stmt.join(ItemScore, ItemScore.item_id == Item.id).where(ItemScore.is_candidate.is_(True))
+    return {"new": db.scalar(stmt) or 0, "now": iso(utcnow())}
 
 
 @app.get("/api/v1/communities")
@@ -255,6 +344,7 @@ def reddit_account_status(db: DB) -> dict:
 
 
 @app.post("/api/v1/reddit/account")
+@commits
 async def reddit_account_connect(db: DB, payload: dict[str, Any] = BODY_REQUIRED) -> dict:
     """Connect with the private feed URL from reddit.com/prefs/feeds and run a first sync."""
     try:
@@ -266,6 +356,7 @@ async def reddit_account_connect(db: DB, payload: dict[str, Any] = BODY_REQUIRED
 
 
 @app.post("/api/v1/reddit/account/sync")
+@commits
 async def reddit_account_sync(db: DB) -> dict:
     sources = reddit_account.account_sources(db)
     if not sources:
@@ -280,11 +371,13 @@ async def _sync_account(db: Session, sources: list[Source]) -> dict:
         results[source.config["account"]] = {"seen": stats.seen, "new": stats.new,
                                               "error": redact_feed_tokens(source.last_error)}
         db.commit()
-    rescore(db, days=30)
+    db.commit()
+    request_rescore(30, delay=0)  # seconds of work: not on the event loop
     return {**reddit_account.status(db), "sync": results}
 
 
 @app.delete("/api/v1/reddit/account")
+@commits
 def reddit_account_disconnect(db: DB) -> dict:
     """Delete the account sources (and with them the stored feed token). Learned signals stay."""
     return {"ok": True, "removed": reddit_account.disconnect(db)}
@@ -322,6 +415,7 @@ async def search(q: str = Query(min_length=2), db: DB = None, limit: int = Query
 
 
 @app.get("/api/v1/search/live")
+@commits
 async def search_live(db: DB, q: str = Query(min_length=2), where: str = Query("reddit", pattern="^(reddit|hackernews)$"),
                       limit: int = Query(25, le=50), period: str = Query("year", pattern="^(day|week|month|year|all)$")) -> dict:
     """Search Reddit or Hacker News beyond what Radar has collected; results open in the reader."""
@@ -354,6 +448,7 @@ def get_brief(item_id: int, db: DB) -> dict:
 
 
 @app.post("/api/v1/items/{item_id}/brief")
+@commits
 async def post_brief(item_id: int, db: DB, refresh: bool = False) -> dict:
     """TL;DR of the post/article and of its discussion, from the local model (cached)."""
     item = db.get(Item, item_id)
@@ -368,10 +463,16 @@ async def post_brief(item_id: int, db: DB, refresh: bool = False) -> dict:
 
 
 @app.get("/api/v1/digest")
+@commits
 def digest(db: DB, period: str = "24h", mode: str = "mixed", limit: int = Query(40, le=100),
            requested_by: str = "api") -> dict:
     hours = _period_hours(period)
-    rescore(db, days=max(2, hours // 24 + 1))
+    days = max(2, hours // 24 + 1)
+    # Fresh arrivals get a score now; the full re-rank (seconds) runs behind the response.
+    score_unscored(db, days=days)
+    last = last_rescored(db)
+    if last is None or last < utcnow() - RESCORE_MAX_AGE:
+        request_rescore(days, delay=0)
     entries = build_feed(db, limit=limit, period_hours=hours, mode=mode)
     digest_id = f"dg_{utcnow():%Y%m%d_%H%M}_{secrets.token_hex(2)}"
     sections: dict[str, list[int]] = {}
@@ -418,6 +519,7 @@ def related(item_id: int, db: DB, limit: int = Query(10, le=50)) -> dict:
 
 
 @app.post("/api/v1/items/{item_id}/feedback")
+@commits
 def feedback(item_id: int, db: DB, payload: dict[str, Any] = BODY_REQUIRED) -> dict:
     item = db.get(Item, item_id)
     if item is None:
@@ -438,6 +540,9 @@ def feedback(item_id: int, db: DB, payload: dict[str, Any] = BODY_REQUIRED) -> d
         score_item(db, item)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
+    if action in ("like", "dislike", "undo", "save", "hide", "skip"):
+        db.commit()
+        request_rescore()  # the taste profile changed: every other item's rank follows, in the background
     return {"ok": True, "event_id": event.id, "item_id": item_id, "action": action,
             "user": item_dict(db, item)["user"]}
 
@@ -455,6 +560,7 @@ def taste_profile(db: DB) -> dict:
 
 
 @app.post("/api/v1/items/{item_id}/save")
+@commits
 def save(item_id: int, db: DB, payload: dict[str, Any] = BODY_OPTIONAL) -> dict:
     item = db.get(Item, item_id)
     if item is None:
@@ -468,6 +574,7 @@ def save(item_id: int, db: DB, payload: dict[str, Any] = BODY_OPTIONAL) -> dict:
 
 
 @app.delete("/api/v1/items/{item_id}/save")
+@commits
 def unsave(item_id: int, db: DB) -> dict:
     row = db.scalar(select(SavedItem).where(SavedItem.item_id == item_id))
     if row:
@@ -501,6 +608,7 @@ def source_catalog(db: DB) -> dict:
 
 
 @app.post("/api/v1/sources")
+@commits
 async def add_source(db: DB, payload: dict[str, Any] = BODY_REQUIRED) -> dict:
     kind = str(payload.get("kind", ""))
     identifier = str(payload.get("identifier", "")).strip()
@@ -534,6 +642,7 @@ async def add_source(db: DB, payload: dict[str, Any] = BODY_REQUIRED) -> dict:
 
 
 @app.patch("/api/v1/sources/{source_id}")
+@commits
 def update_source(source_id: int, db: DB, payload: dict[str, Any] = BODY_REQUIRED) -> dict:
     source = db.get(Source, source_id)
     if source is None:
@@ -559,6 +668,7 @@ def discovery(db: DB) -> dict:
 
 
 @app.post("/api/v1/discovery/{candidate_id}/{action}")
+@commits
 def discovery_action(candidate_id: int, action: str, db: DB) -> dict:
     candidate = db.get(DiscoveryCandidate, candidate_id)
     if candidate is None:
@@ -580,11 +690,15 @@ def settings(db: DB) -> dict:
 
 
 @app.patch("/api/v1/settings/{key}")
+@commits
 def update_setting(key: str, db: DB, payload: dict[str, Any] = BODY_REQUIRED) -> dict:
     try:
         value = set_value(db, key, payload.get("value"))
     except KeyError as exc:
         raise HTTPException(404, str(exc)) from exc
+    if key.startswith(("ranking.", "feed.")):
+        db.commit()
+        request_rescore()
     return {"key": key, "value": value}
 
 
@@ -619,6 +733,31 @@ async def remote_media(u: str, db: DB):
         db.commit()
     return FileResponse(paths.image_cache_dir() / row.cache_path, media_type="image/webp",
                         headers={"Cache-Control": "public, max-age=604800"})
+
+
+_item_image_locks: dict[int, asyncio.Lock] = {}
+
+
+@app.get("/media/item/{item_id}")
+async def item_media(item_id: int, db: DB):
+    """An item's picture, cached on first request. Feeds point here for items whose image the worker
+    has not cached yet, so pictures appear while scrolling instead of after the next worker cycle."""
+    lock = _item_image_locks.setdefault(item_id, asyncio.Lock())
+    async with lock:  # the same picture requested twice at once is downloaded once
+        item = db.get(Item, item_id)
+        if item is None:
+            raise HTTPException(404, "item not found")
+        if item.image_id is None and item.image_state == "pending":
+            await cache_item_image(db, image_cache(db, api_http()), item)
+            db.commit()
+        image = db.get(Image, item.image_id) if item.image_id else None
+    _item_image_locks.pop(item_id, None)
+    if image is None or image.status != "ok" or not image.cache_path:
+        raise HTTPException(404, "no image")
+    path = paths.image_cache_dir() / image.cache_path
+    if not path.is_file():
+        raise HTTPException(404, "cached image missing")
+    return FileResponse(path, media_type="image/webp", headers={"Cache-Control": "public, max-age=604800"})
 
 
 @app.get("/media/{image_id}")

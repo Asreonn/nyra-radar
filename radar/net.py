@@ -29,6 +29,12 @@ HOST_INTERVALS: dict[str, float] = {
     "api.ossinsight.io": 1.5,
     "www.youtube.com": 1.0,
     "t.me": 2.0,
+    # Image CDNs: pictures are requested as the reader scrolls, so they must not queue up.
+    "i.redd.it": 0.05,
+    "preview.redd.it": 0.05,
+    "external-preview.redd.it": 0.05,
+    "i.ytimg.com": 0.05,
+    "i.imgur.com": 0.2,
 }
 DEFAULT_HOST_INTERVAL = 0.5
 RETRY_STATUSES = {429, 500, 502, 503, 504}
@@ -110,9 +116,11 @@ class Http:
         max_bytes: int = 6_000_000,
         timeout: float | None = None,
         accept_statuses: tuple[int, ...] = (200,),
+        retry_on_429: bool = True,
     ) -> Response:
         return await self.request("GET", url, headers=headers, params=params, retries=retries,
-                                  max_bytes=max_bytes, timeout=timeout, accept_statuses=accept_statuses)
+                                  max_bytes=max_bytes, timeout=timeout, accept_statuses=accept_statuses,
+                                  retry_on_429=retry_on_429)
 
     async def request(
         self,
@@ -127,7 +135,10 @@ class Http:
         max_bytes: int = 6_000_000,
         timeout: float | None = None,
         accept_statuses: tuple[int, ...] = (200,),
+        retry_on_429: bool = True,
     ) -> Response:
+        """`retry_on_429=False` raises at once on "too many requests" (with `retry_after` set), for
+        callers that keep their own shared cooldown instead of sleeping inside the request."""
         host = urlsplit(url).hostname or ""
         attempt = 0
         while True:
@@ -160,7 +171,9 @@ class Http:
                 continue
             if result.status_code in accept_statuses or result.status_code == 304:
                 return result
-            retry_after = _retry_after(result.headers.get("retry-after"))
+            retry_after = _retry_after(result.headers.get("retry-after") or result.headers.get("x-ratelimit-reset"))
+            if result.status_code == 429 and not retry_on_429:
+                raise HttpError(f"HTTP 429 for {url[:200]}", 429, retry_after)
             if result.status_code in RETRY_STATUSES and attempt <= retries:
                 delay = retry_after if retry_after is not None else (2 ** attempt) * 1.5 + random.random()
                 if result.status_code == 429:

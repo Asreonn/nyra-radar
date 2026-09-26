@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from radar.clustering.vector_index import VectorIndex, get_index
 from radar.collectors.reddit import RANKED_SORTS
 from radar.db.models import (
+    KV,
     CommunityPost,
     Embedding,
     Interest,
@@ -26,7 +27,7 @@ from radar.db.models import (
 )
 from radar.services.community import feed_excluded
 from radar.services.settings import get as get_setting
-from radar.util import utcnow
+from radar.util import iso, parse_datetime, utcnow
 
 
 def _sat(value: float, scale: float) -> float:
@@ -281,15 +282,49 @@ def score_item(session: Session, item: Item, ctx: RankContext | None = None) -> 
     return row
 
 
-def rescore(session: Session, *, days: int = 14, limit: int = 3000) -> int:
+RESCORED_KEY = "ranking.rescored_at"
+
+
+def rescore(session: Session, *, days: int = 14, limit: int = 3000, background: bool = False) -> int:
+    """Re-rank recent items. `background` computes every score first and writes them in one short
+    flush at the end, so a pass running beside the API holds SQLite's write lock for milliseconds
+    instead of seconds (page loads and clicks never queue behind it)."""
     cutoff = utcnow() - timedelta(days=days)
     items = session.scalars(
         select(Item).where(Item.first_seen_at >= cutoff).order_by(Item.first_seen_at.desc()).limit(limit)
     ).all()
     ctx = rank_context(session)
-    for item in items:
-        score_item(session, item, ctx)
+    if background:
+        with session.no_autoflush:
+            for item in items:
+                score_item(session, item, ctx)
+    else:
+        for item in items:
+            score_item(session, item, ctx)
+    row = session.get(KV, RESCORED_KEY) or KV(key=RESCORED_KEY)
+    session.add(row)
+    row.value = {"at": iso(utcnow()), "items": len(items)}
     session.flush()
+    return len(items)
+
+
+def last_rescored(session: Session):
+    row = session.get(KV, RESCORED_KEY)
+    return parse_datetime((row.value or {}).get("at")) if row and row.value else None
+
+
+def score_unscored(session: Session, *, days: int = 14, limit: int = 500) -> int:
+    """Score only items that have no score yet (fresh arrivals); cheap enough for a request."""
+    cutoff = utcnow() - timedelta(days=days)
+    items = session.scalars(
+        select(Item).outerjoin(ItemScore, ItemScore.item_id == Item.id)
+        .where(Item.first_seen_at >= cutoff, ItemScore.item_id.is_(None)).limit(limit)
+    ).all()
+    if items:
+        ctx = rank_context(session)
+        for item in items:
+            score_item(session, item, ctx)
+        session.flush()
     return len(items)
 
 
